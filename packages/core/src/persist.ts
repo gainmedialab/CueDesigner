@@ -1,10 +1,76 @@
-import { PROJECT_SCHEMA_VERSION, type Project, type ProjectFile } from "./types.js";
+import { clampTimelineZoom, defaultSettings } from "./project.js";
+import {
+  PROJECT_SCHEMA_VERSION,
+  type GridResolution,
+  type Project,
+  type ProjectFile,
+  type ProjectSettings,
+} from "./types.js";
 
 export class PersistError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PersistError";
   }
+}
+
+const GRID_RESOLUTIONS: ReadonlySet<string> = new Set([
+  "bar",
+  "beat",
+  "1/4",
+  "1/8",
+  "1/16",
+  "1/32",
+]);
+
+function normalizeSettings(raw: unknown): ProjectSettings {
+  const defaults = defaultSettings();
+  if (!raw || typeof raw !== "object") return defaults;
+  const s = raw as Record<string, unknown>;
+  const bpm =
+    typeof s.bpm === "number" && Number.isFinite(s.bpm) && s.bpm > 0
+      ? s.bpm
+      : defaults.bpm;
+  let timeSignature: [number, number] = defaults.timeSignature;
+  if (Array.isArray(s.timeSignature) && s.timeSignature.length >= 2) {
+    const n = Number(s.timeSignature[0]);
+    const d = Number(s.timeSignature[1]);
+    if (Number.isFinite(n) && n > 0 && Number.isFinite(d) && d > 0) {
+      timeSignature = [n, d];
+    }
+  }
+  const downbeatOffsetSec =
+    typeof s.downbeatOffsetSec === "number" &&
+    Number.isFinite(s.downbeatOffsetSec)
+      ? s.downbeatOffsetSec
+      : defaults.downbeatOffsetSec;
+  const gridResolution: GridResolution =
+    typeof s.gridResolution === "string" &&
+    GRID_RESOLUTIONS.has(s.gridResolution)
+      ? (s.gridResolution as GridResolution)
+      : defaults.gridResolution;
+  const snapEnabled =
+    typeof s.snapEnabled === "boolean" ? s.snapEnabled : defaults.snapEnabled;
+  const timelineZoom =
+    typeof s.timelineZoom === "number" && Number.isFinite(s.timelineZoom)
+      ? clampTimelineZoom(s.timelineZoom)
+      : defaults.timelineZoom;
+  const fps =
+    typeof s.fps === "string" ? (s.fps as ProjectSettings["fps"]) : defaults.fps;
+  const showTcOffsetSec =
+    typeof s.showTcOffsetSec === "number" && Number.isFinite(s.showTcOffsetSec)
+      ? s.showTcOffsetSec
+      : defaults.showTcOffsetSec;
+  return {
+    bpm,
+    timeSignature,
+    downbeatOffsetSec,
+    gridResolution,
+    snapEnabled,
+    timelineZoom,
+    fps,
+    showTcOffsetSec,
+  };
 }
 
 function assertProjectShape(raw: unknown): asserts raw is Project {
@@ -53,8 +119,12 @@ export function deserializeProject(json: string): ProjectFile {
   // Accept both wrapped { project } and bare Project for flexibility
   const projectRaw = "project" in root ? root.project : root;
   assertProjectShape(projectRaw);
+  const normalized: Project = {
+    ...projectRaw,
+    settings: normalizeSettings(projectRaw.settings),
+  };
   return {
-    project: projectRaw,
+    project: normalized,
     mediaDataUrl:
       typeof root.mediaDataUrl === "string" ? root.mediaDataUrl : undefined,
   };

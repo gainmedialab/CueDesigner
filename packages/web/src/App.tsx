@@ -1,5 +1,6 @@
 import {
   addDepartment,
+  clampTimelineZoom,
   createCue,
   createId,
   createProject,
@@ -8,21 +9,30 @@ import {
   deleteCuesForDepartment,
   deserializeProject,
   formatAbsoluteTime,
+  formatMusicalPosition,
+  GRID_RESOLUTIONS,
+  gridLineTimes,
+  gridResolutionLabel,
   moveCue,
   nextDeptCueNumber,
   placeCue,
   projectDownloadBlob,
   renameDepartment,
   recolorDepartment,
+  rulerMarkTimes,
   setProjectMedia,
+  snapToGrid,
   touchProject,
   updateCue,
+  updateSettings,
   type Cue,
+  type GridResolution,
   type Project,
 } from "@cuedesigner/core";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -40,6 +50,19 @@ import {
 } from "./mediaStore";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
+/** Matches `.track` label column / ruler gutter width. */
+const TRACK_LABEL_W = 100;
+const ZOOM_STEP = 1.25;
+
+/** Snap unless Alt/Option is held, or project snap is disabled. */
+function applySnap(
+  t: number,
+  settings: Project["settings"],
+  bypass: boolean,
+): number {
+  if (bypass || !settings.snapEnabled) return Math.max(0, t);
+  return snapToGrid(t, settings);
+}
 
 export function App() {
   const [project, setProject] = useState<Project>(() => createProject("Untitled Show"));
@@ -57,11 +80,17 @@ export function App() {
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
+  /** After zoom, restore scroll so this time stays under cursorX in the scrollport. */
+  const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
+    null,
+  );
   /** Current session media bytes (for save embed + IndexedDB). */
   const mediaBlobRef = useRef<Blob | null>(null);
   const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
+  const [scrollPortW, setScrollPortW] = useState(0);
 
   // Keep active department valid
   useEffect(() => {
@@ -113,6 +142,17 @@ export function App() {
     };
   }, [playing]);
 
+  // Measure timeline scrollport for denser ruler marks
+  useEffect(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const measure = () => setScrollPortW(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // Draw waveform on first track lane width
   useEffect(() => {
     const canvas = waveCanvasRef.current;
@@ -121,9 +161,77 @@ export function App() {
     const onResize = () => drawPeaks(canvas, peaks, "#6b8caf");
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [peaks, project.departments.length]);
+  }, [peaks, project.departments.length, project.settings.timelineZoom]);
 
   const duration = project.media?.durationSec ?? 0;
+  const zoom = clampTimelineZoom(project.settings.timelineZoom);
+
+  // Keep zoom-to-cursor / zoom-around-playhead scroll anchor after layout
+  useLayoutEffect(() => {
+    const anchor = pendingZoomAnchorRef.current;
+    const el = timelineScrollRef.current;
+    if (!anchor || !el || !(duration > 0)) return;
+    pendingZoomAnchorRef.current = null;
+    const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+    const laneX = (anchor.t / duration) * laneW;
+    el.scrollLeft = Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX);
+  }, [zoom, duration]);
+
+  const applyTimelineZoom = useCallback(
+    (nextZoom: number, anchor: { t: number; cursorX: number } | null) => {
+      const next = clampTimelineZoom(nextZoom);
+      if (next === zoom) return;
+      pendingZoomAnchorRef.current = anchor;
+      setProject((p) => updateSettings(p, { timelineZoom: next }));
+    },
+    [zoom],
+  );
+
+  const zoomAroundPlayhead = useCallback(
+    (nextZoom: number) => {
+      const el = timelineScrollRef.current;
+      let cursorX = (el?.clientWidth ?? 0) / 2;
+      if (el && duration > 0) {
+        const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+        const playheadViewX =
+          TRACK_LABEL_W + (currentTime / duration) * laneW - el.scrollLeft;
+        if (playheadViewX >= 0 && playheadViewX <= el.clientWidth) {
+          cursorX = playheadViewX;
+        }
+      }
+      applyTimelineZoom(nextZoom, { t: currentTime, cursorX });
+    },
+    [applyTimelineZoom, currentTime, duration],
+  );
+
+  // Non-passive wheel so Ctrl/⌘+wheel can zoom without browser page-zoom.
+  useEffect(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) {
+        if (zoom > 1 && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
+          e.preventDefault();
+          el.scrollLeft += e.deltaY;
+        }
+        return;
+      }
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const contentX = el.scrollLeft + cursorX;
+      const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+      const laneX = contentX - TRACK_LABEL_W;
+      const t =
+        duration > 0
+          ? Math.max(0, Math.min(duration, (laneX / laneW) * duration))
+          : 0;
+      const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      applyTimelineZoom(zoom * factor, { t, cursorX });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [applyTimelineZoom, duration, zoom]);
 
   const seek = useCallback((t: number) => {
     const audio = audioRef.current;
@@ -327,11 +435,12 @@ export function App() {
     setStatus("New project created.");
   };
 
-  const placeAtPlayhead = () => {
+  const placeAtPlayhead = (bypassSnap = false) => {
     if (!activeDeptId) return;
+    const tAbs = applySnap(currentTime, project.settings, bypassSnap);
     const draft = createCue({
       id: createId(),
-      tAbs: currentTime,
+      tAbs,
       departmentId: activeDeptId,
       cueNoDept: nextDeptCueNumber(project.cues, activeDeptId),
       label: "Cue",
@@ -340,19 +449,25 @@ export function App() {
       touchProject({ ...p, cues: placeCue(p.cues, draft) }),
     );
     setSelectedCueId(draft.id);
-    setStatus(`Placed cue at ${formatAbsoluteTime(currentTime)}`);
+    const musical = formatMusicalPosition(tAbs, project.settings);
+    setStatus(
+      `Placed cue at ${formatAbsoluteTime(tAbs)} (${musical})${
+        bypassSnap || !project.settings.snapEnabled ? " — free" : " — snapped"
+      }`,
+    );
   };
 
   const onLanePointer = (e: ReactPointerEvent<HTMLDivElement>, deptId: string) => {
     const lane = e.currentTarget;
     const rect = lane.getBoundingClientRect();
     const ratio = (e.clientX - rect.left) / rect.width;
-    const t = ratio * (duration || 1);
+    const rawT = ratio * (duration || 1);
     if (e.detail === 2) {
-      // double-click places cue
+      // double-click places cue (Alt bypasses snap)
+      const tAbs = applySnap(rawT, project.settings, e.altKey);
       const draft = createCue({
         id: createId(),
-        tAbs: t,
+        tAbs,
         departmentId: deptId,
         cueNoDept: nextDeptCueNumber(project.cues, deptId),
       });
@@ -363,7 +478,7 @@ export function App() {
       setActiveDeptId(deptId);
       return;
     }
-    seek(t);
+    seek(rawT);
     setActiveDeptId(deptId);
   };
 
@@ -371,14 +486,24 @@ export function App() {
     e: ReactPointerEvent<HTMLDivElement>,
     cue: Cue,
   ) => {
+    // Keep cue drag from seeking the lane or panning the zoomed timeline/waveform.
     e.stopPropagation();
+    e.preventDefault();
+    if (e.button !== 0) return;
+
     setSelectedCueId(cue.id);
     setActiveDeptId(cue.departmentId);
     dragCueIdRef.current = cue.id;
 
+    const marker = e.currentTarget;
+    marker.setPointerCapture(e.pointerId);
+
     // Map against the track-lane (cue % left), not .tracks (includes labels).
-    const lane = e.currentTarget.parentElement;
+    const lane = marker.parentElement;
     if (!lane) return;
+
+    const scrollEl = timelineScrollRef.current;
+    const lockedScrollLeft = scrollEl?.scrollLeft ?? 0;
 
     const startRect = lane.getBoundingClientRect();
     const startWidth = startRect.width || 1;
@@ -389,30 +514,58 @@ export function App() {
 
     const onMove = (ev: PointerEvent) => {
       if (!dragCueIdRef.current) return;
+      // Reject scrollport pan that can ride along with cue drag when zoomed.
+      if (scrollEl && scrollEl.scrollLeft !== lockedScrollLeft) {
+        scrollEl.scrollLeft = lockedScrollLeft;
+      }
       const rect = lane.getBoundingClientRect();
       const width = rect.width || 1;
       const pointerT = ((ev.clientX - rect.left) / width) * (duration || 1);
-      const t = Math.max(0, Math.min(duration || 1, pointerT - grabOffsetT));
-      setProject((p) =>
-        touchProject({
+      const raw = Math.max(0, Math.min(duration || 1, pointerT - grabOffsetT));
+      setProject((p) => {
+        const t = applySnap(raw, p.settings, ev.altKey);
+        return touchProject({
           ...p,
           cues: moveCue(p.cues, dragCueIdRef.current!, t),
-        }),
-      );
+        });
+      });
     };
-    const onUp = () => {
+    const onUp = (ev: PointerEvent) => {
       dragCueIdRef.current = null;
+      if (marker.hasPointerCapture(ev.pointerId)) {
+        marker.releasePointerCapture(ev.pointerId);
+      }
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   };
 
   const selectedCue = project.cues.find((c) => c.id === selectedCueId) ?? null;
 
   const playheadPct =
     duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+
+  const gridLines =
+    duration > 0
+      ? gridLineTimes(
+          project.settings,
+          duration,
+          Math.min(2000, Math.ceil(500 * zoom)),
+        )
+      : [];
+
+  const laneContentW = Math.max(0, scrollPortW * zoom - TRACK_LABEL_W);
+  const rulerMarks =
+    duration > 0 ? rulerMarkTimes(duration, laneContentW || scrollPortW) : [];
+
+  const musicalNow = formatMusicalPosition(currentTime, project.settings);
+  const [sigNum, sigDen] = project.settings.timeSignature;
+  const zoomLabel =
+    zoom >= 10 ? `${Math.round(zoom)}×` : `${zoom.toFixed(1)}×`;
 
   return (
     <div className="app">
@@ -423,6 +576,7 @@ export function App() {
         <div className="meta">
           {project.name}
           {project.media ? ` · ${project.media.name}` : " · no media"}
+          {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen}`}
         </div>
         <div className="actions">
           <button type="button" onClick={onNewProject}>
@@ -465,7 +619,12 @@ export function App() {
         <button type="button" onClick={() => seek(0)} disabled={!mediaUrl}>
           ⇤
         </button>
-        <span className="clock">{formatAbsoluteTime(currentTime)}</span>
+        <div className="clock-block">
+          <span className="clock">{formatAbsoluteTime(currentTime)}</span>
+          <span className="clock-musical" title="Musical position (bar.beat)">
+            {musicalNow}
+          </span>
+        </div>
         <input
           className="scrub"
           type="range"
@@ -479,9 +638,159 @@ export function App() {
         <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
           {formatAbsoluteTime(duration)}
         </span>
-        <button type="button" onClick={placeAtPlayhead} disabled={!activeDeptId}>
+        <button
+          type="button"
+          onClick={(e) => placeAtPlayhead(e.altKey)}
+          disabled={!activeDeptId}
+          title="Place cue at playhead (hold Alt for free placement)"
+        >
           Cue at playhead
         </button>
+      </div>
+
+      <div className="grid-bar" aria-label="BPM and snap settings">
+        <label className="grid-field">
+          BPM
+          <input
+            type="number"
+            min={20}
+            max={400}
+            step={0.1}
+            value={project.settings.bpm}
+            onChange={(e) => {
+              const bpm = Number(e.target.value);
+              if (!Number.isFinite(bpm) || bpm <= 0) return;
+              setProject((p) => updateSettings(p, { bpm }));
+            }}
+          />
+        </label>
+        <label className="grid-field">
+          Time sig
+          <span className="time-sig">
+            <input
+              type="number"
+              min={1}
+              max={32}
+              value={sigNum}
+              aria-label="Beats per bar"
+              onChange={(e) => {
+                const n = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(n) || n <= 0) return;
+                setProject((p) =>
+                  updateSettings(p, {
+                    timeSignature: [n, p.settings.timeSignature[1]],
+                  }),
+                );
+              }}
+            />
+            <span>/</span>
+            <input
+              type="number"
+              min={1}
+              max={32}
+              value={sigDen}
+              aria-label="Beat unit"
+              onChange={(e) => {
+                const d = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(d) || d <= 0) return;
+                setProject((p) =>
+                  updateSettings(p, {
+                    timeSignature: [p.settings.timeSignature[0], d],
+                  }),
+                );
+              }}
+            />
+          </span>
+        </label>
+        <label className="grid-field">
+          Downbeat
+          <input
+            type="number"
+            min={0}
+            step={0.001}
+            value={project.settings.downbeatOffsetSec}
+            title="Downbeat offset from file start (seconds)"
+            onChange={(e) => {
+              const downbeatOffsetSec = Number(e.target.value);
+              if (!Number.isFinite(downbeatOffsetSec)) return;
+              setProject((p) =>
+                updateSettings(p, {
+                  downbeatOffsetSec: Math.max(0, downbeatOffsetSec),
+                }),
+              );
+            }}
+          />
+          <span className="unit">s</span>
+        </label>
+        <label className="grid-field">
+          Snap
+          <select
+            value={project.settings.gridResolution}
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, {
+                  gridResolution: e.target.value as GridResolution,
+                }),
+              )
+            }
+          >
+            {GRID_RESOLUTIONS.map((res) => (
+              <option key={res} value={res}>
+                {gridResolutionLabel(res)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid-field checkbox">
+          <input
+            type="checkbox"
+            checked={project.settings.snapEnabled}
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, { snapEnabled: e.target.checked }),
+              )
+            }
+          />
+          Magnetic snap
+        </label>
+        <div className="grid-field zoom-field" aria-label="Timeline zoom">
+          <span>Zoom</span>
+          <button
+            type="button"
+            className="zoom-btn"
+            title="Zoom out (around playhead)"
+            disabled={zoom <= 1}
+            onClick={() => zoomAroundPlayhead(zoom / ZOOM_STEP)}
+          >
+            −
+          </button>
+          <input
+            className="zoom-slider"
+            type="range"
+            min={1}
+            max={32}
+            step={0.1}
+            value={Math.min(32, zoom)}
+            title="Timeline zoom"
+            onChange={(e) => zoomAroundPlayhead(Number(e.target.value))}
+          />
+          <button
+            type="button"
+            className="zoom-btn"
+            title="Zoom in (around playhead)"
+            disabled={zoom >= 64}
+            onClick={() => zoomAroundPlayhead(zoom * ZOOM_STEP)}
+          >
+            +
+          </button>
+          <span className="zoom-value" title="Timeline zoom factor">
+            {zoomLabel}
+          </span>
+        </div>
+        <span className="grid-hint">
+          Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
+          <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor
+        </span>
       </div>
 
       <div className="workspace">
@@ -593,55 +902,90 @@ export function App() {
               </>
             )}
           </div>
-          <p className="hint">Double-click a track to place a cue.</p>
+          <p className="hint">
+            Double-click a track to place a cue. Hold Alt for free (unsnapped)
+            placement.
+          </p>
         </aside>
 
         <main className="timeline-wrap">
-          <div className="ruler" style={{ marginLeft: 100 }}>
-            {duration > 0 &&
-              Array.from({ length: Math.min(12, Math.ceil(duration / 10) + 1) }, (_, i) => {
-                const t = (i / Math.max(1, Math.ceil(duration / 10))) * duration;
-                const pct = duration > 0 ? (t / duration) * 100 : 0;
-                return (
-                  <span key={i} className="ruler-mark" style={{ left: `${pct}%` }}>
-                    {formatAbsoluteTime(t)}
-                  </span>
-                );
-              })}
-          </div>
-          <div className="tracks">
-            {project.departments.map((d, idx) => (
-              <div className="track" key={d.id}>
-                <div className="track-label">
-                  <span className="dept-swatch" style={{ background: d.color }} />
-                  {d.name}
-                </div>
-                <div
-                  className="track-lane"
-                  onPointerDown={(e) => onLanePointer(e, d.id)}
-                >
-                  {idx === 0 && peaks && (
-                    <canvas ref={waveCanvasRef} className="waveform" />
-                  )}
-                  {project.cues
-                    .filter((c) => c.departmentId === d.id)
-                    .map((c) => {
-                      const left =
-                        duration > 0 ? `${(c.tAbs / duration) * 100}%` : "0%";
-                      return (
-                        <div
-                          key={c.id}
-                          className={`cue-marker${c.id === selectedCueId ? " selected" : ""}`}
-                          style={{ left, background: d.color }}
-                          title={`${c.cueNoDept} ${c.label}`}
-                          onPointerDown={(e) => onCuePointerDown(e, c)}
-                        />
-                      );
-                    })}
-                  <div className="playhead" style={{ left: `${playheadPct}%` }} />
+          <div className="timeline-scroll" ref={timelineScrollRef}>
+            <div
+              className="timeline-content"
+              style={{ width: `${zoom * 100}%` }}
+            >
+              <div className="ruler-row">
+                <div className="ruler-gutter" aria-hidden />
+                <div className="ruler">
+                  {rulerMarks.map((t, i) => {
+                    const pct = duration > 0 ? (t / duration) * 100 : 0;
+                    return (
+                      <span
+                        key={`${t}-${i}`}
+                        className="ruler-mark"
+                        style={{ left: `${pct}%` }}
+                      >
+                        {formatAbsoluteTime(t)}
+                        <span className="ruler-musical">
+                          {formatMusicalPosition(t, project.settings)}
+                        </span>
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
-            ))}
+              <div className="tracks">
+                {project.departments.map((d, idx) => (
+                  <div className="track" key={d.id}>
+                    <div className="track-label">
+                      <span
+                        className="dept-swatch"
+                        style={{ background: d.color }}
+                      />
+                      {d.name}
+                    </div>
+                    <div
+                      className="track-lane"
+                      onPointerDown={(e) => onLanePointer(e, d.id)}
+                    >
+                      {idx === 0 && peaks && (
+                        <canvas ref={waveCanvasRef} className="waveform" />
+                      )}
+                      {gridLines.map((line, lineIdx) => (
+                        <div
+                          key={`${line.kind}-${lineIdx}-${line.t}`}
+                          className={`grid-line grid-line--${line.kind}`}
+                          style={{
+                            left: `${duration > 0 ? (line.t / duration) * 100 : 0}%`,
+                          }}
+                        />
+                      ))}
+                      {project.cues
+                        .filter((c) => c.departmentId === d.id)
+                        .map((c) => {
+                          const left =
+                            duration > 0
+                              ? `${(c.tAbs / duration) * 100}%`
+                              : "0%";
+                          return (
+                            <div
+                              key={c.id}
+                              className={`cue-marker${c.id === selectedCueId ? " selected" : ""}`}
+                              style={{ left, background: d.color }}
+                              title={`${c.cueNoDept} ${c.label} · ${formatAbsoluteTime(c.tAbs)} · ${formatMusicalPosition(c.tAbs, project.settings)}`}
+                              onPointerDown={(e) => onCuePointerDown(e, c)}
+                            />
+                          );
+                        })}
+                      <div
+                        className="playhead"
+                        style={{ left: `${playheadPct}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </main>
 
@@ -746,6 +1090,27 @@ export function App() {
                   }
                 />
               </label>
+              <div className="inspector-meta">
+                Musical:{" "}
+                {formatMusicalPosition(selectedCue.tAbs, project.settings)}
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setProject((p) =>
+                    touchProject({
+                      ...p,
+                      cues: moveCue(
+                        p.cues,
+                        selectedCue.id,
+                        snapToGrid(selectedCue.tAbs, p.settings),
+                      ),
+                    }),
+                  )
+                }
+              >
+                Snap to grid
+              </button>
               <button
                 type="button"
                 className="danger"
