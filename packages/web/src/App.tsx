@@ -127,6 +127,8 @@ export function App() {
   const suppressScrollFollowPauseRef = useRef(false);
   const followPlayheadRef = useRef(followPlayhead);
   followPlayheadRef.current = followPlayhead;
+  /** Latest zoom for keyboard shortcuts (avoids stale closure on key repeat). */
+  const zoomRef = useRef(1);
   /** Current session media bytes (for save embed + IndexedDB). */
   const mediaBlobRef = useRef<Blob | null>(null);
   const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
@@ -288,6 +290,7 @@ export function App() {
 
   const duration = project.media?.durationSec ?? 0;
   const zoom = clampTimelineZoom(project.settings.timelineZoom);
+  zoomRef.current = zoom;
 
   // Viewport waveform: peaks keyed to the same tAbs % as cues/grid/playhead.
   // Canvas covers only the visible lane slice so zoom keeps ~1 peak per device pixel.
@@ -451,6 +454,65 @@ export function App() {
       }
     }
   }, [mediaUrl, playing]);
+
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
+  const zoomAroundPlayheadRef = useRef(zoomAroundPlayhead);
+  zoomAroundPlayheadRef.current = zoomAroundPlayhead;
+
+  // Global transport / timeline shortcuts — ignored while typing in fields.
+  useEffect(() => {
+    const isTypingTarget = (el: EventTarget | null) => {
+      if (!(el instanceof HTMLElement)) return false;
+      if (el.isContentEditable) return true;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      return Boolean(
+        el.closest("input, textarea, select, [contenteditable='true']"),
+      );
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (isTypingTarget(e.target)) return;
+      // Leave browser / OS chords alone (Find, etc.).
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+
+      if (key === " " || e.code === "Space") {
+        if (e.repeat) return;
+        e.preventDefault();
+        void togglePlayRef.current();
+        return;
+      }
+      if (key === "f") {
+        if (e.repeat) return;
+        e.preventDefault();
+        setFollowPlayhead((on) => {
+          const next = !on;
+          if (next) setFollowSuspended(false);
+          return next;
+        });
+        return;
+      }
+      if (key === "g") {
+        if (e.repeat) return;
+        e.preventDefault();
+        zoomAroundPlayheadRef.current(zoomRef.current / ZOOM_STEP);
+        return;
+      }
+      if (key === "h") {
+        if (e.repeat) return;
+        e.preventDefault();
+        zoomAroundPlayheadRef.current(zoomRef.current * ZOOM_STEP);
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
