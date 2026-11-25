@@ -74,6 +74,8 @@ const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
 const TRACK_LABEL_W = 100;
 const ZOOM_STEP = 1.25;
+/** Keep playhead this fraction into the visible lane while following. */
+const FOLLOW_VIEW_FRAC = 0.35;
 
 /** Snap unless Alt/Option is held, or project snap is disabled. */
 function applySnap(
@@ -104,6 +106,8 @@ export function App() {
   const [tcOffsetDraft, setTcOffsetDraft] = useState<string | null>(null);
   /** Scrollport scrollLeft — drives viewport waveform redraw. */
   const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
+  /** Auto-scroll timeline to keep playhead in view while playing (when zoomed). */
+  const [followPlayhead, setFollowPlayhead] = useState(true);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
@@ -117,10 +121,23 @@ export function App() {
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
   );
+  /** Ignore programmatic scrollLeft when deciding to pause follow. */
+  const suppressScrollFollowPauseRef = useRef(false);
+  const followPlayheadRef = useRef(followPlayhead);
+  followPlayheadRef.current = followPlayhead;
   /** Current session media bytes (for save embed + IndexedDB). */
   const mediaBlobRef = useRef<Blob | null>(null);
   const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
   const [scrollPortW, setScrollPortW] = useState(0);
+
+  const setScrollLeftProgrammatic = useCallback((left: number) => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    suppressScrollFollowPauseRef.current = true;
+    el.scrollLeft = left;
+    setTimelineScrollLeft(el.scrollLeft);
+    suppressScrollFollowPauseRef.current = false;
+  }, []);
 
   // Keep active department valid
   useEffect(() => {
@@ -232,7 +249,8 @@ export function App() {
     };
   }, [playing]);
 
-  // Measure timeline scrollport for denser ruler marks + track scroll for waveform
+  // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
+  // Manual scroll pauses playhead follow; programmatic scrolls are suppressed.
   useEffect(() => {
     const el = timelineScrollRef.current;
     if (!el) return;
@@ -241,7 +259,15 @@ export function App() {
       setTimelineScrollLeft(el.scrollLeft);
     };
     measure();
-    const onScroll = () => setTimelineScrollLeft(el.scrollLeft);
+    const onScroll = () => {
+      setTimelineScrollLeft(el.scrollLeft);
+      if (
+        !suppressScrollFollowPauseRef.current &&
+        followPlayheadRef.current
+      ) {
+        setFollowPlayhead(false);
+      }
+    };
     el.addEventListener("scroll", onScroll, { passive: true });
     const ro = new ResizeObserver(measure);
     ro.observe(el);
@@ -299,8 +325,36 @@ export function App() {
     pendingZoomAnchorRef.current = null;
     const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
     const laneX = (timeToLanePercent(anchor.t, duration) / 100) * laneW;
-    el.scrollLeft = Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX);
-  }, [zoom, duration]);
+    setScrollLeftProgrammatic(
+      Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX),
+    );
+  }, [zoom, duration, setScrollLeftProgrammatic]);
+
+  // While playing with follow on and zoomed, keep the playhead in the viewport.
+  useLayoutEffect(() => {
+    if (!playing || !followPlayhead || zoom <= 1 || !(duration > 0)) return;
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+    const playheadLaneX =
+      (timeToLanePercent(currentTime, duration) / 100) * laneW;
+    const viewLaneW = Math.max(1, el.clientWidth - TRACK_LABEL_W);
+    const targetViewX = viewLaneW * FOLLOW_VIEW_FRAC;
+    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+    const next = Math.max(
+      0,
+      Math.min(maxScroll, playheadLaneX - targetViewX),
+    );
+    if (Math.abs(el.scrollLeft - next) < 0.5) return;
+    setScrollLeftProgrammatic(next);
+  }, [
+    playing,
+    followPlayhead,
+    zoom,
+    duration,
+    currentTime,
+    setScrollLeftProgrammatic,
+  ]);
 
   const applyTimelineZoom = useCallback(
     (nextZoom: number, anchor: { t: number; cursorX: number } | null) => {
@@ -373,6 +427,8 @@ export function App() {
       audio.pause();
       setPlaying(false);
     } else {
+      // Resume follow when starting playback (manual scroll pauses it).
+      setFollowPlayhead(true);
       try {
         // Resume shared AudioContext before play — MediaElementSource is mute while suspended.
         await metronomeRef.current?.resume();
@@ -645,7 +701,9 @@ export function App() {
       if (!dragCueIdRef.current) return;
       // Reject scrollport pan that can ride along with cue drag when zoomed.
       if (scrollEl && scrollEl.scrollLeft !== lockedScrollLeft) {
+        suppressScrollFollowPauseRef.current = true;
         scrollEl.scrollLeft = lockedScrollLeft;
+        suppressScrollFollowPauseRef.current = false;
       }
       const rect = lane.getBoundingClientRect();
       const width = rect.width || 1;
@@ -1061,6 +1119,25 @@ export function App() {
             {zoomLabel}
           </span>
         </div>
+        <label
+          className="grid-field follow-field"
+          title={
+            zoom <= 1
+              ? "Follow playhead (active when zoomed in)"
+              : followPlayhead
+                ? "Following playhead — scroll to pause"
+                : "Follow paused — play or check to resume"
+          }
+        >
+          <input
+            type="checkbox"
+            checked={followPlayhead}
+            disabled={zoom <= 1}
+            onChange={(e) => setFollowPlayhead(e.target.checked)}
+            aria-label="Follow playhead"
+          />
+          Follow
+        </label>
         <span className="grid-hint">
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor

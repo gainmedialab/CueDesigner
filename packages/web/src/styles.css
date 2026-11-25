@@ -292,6 +292,15 @@ input[type="color"] {
   font-variant-numeric: tabular-nums;
 }
 
+.follow-field {
+  gap: 0.35rem;
+  user-select: none;
+}
+
+.follow-field input {
+  accent-color: var(--accent);
+}
+
 .grid-line {
   position: absolute;
   top: 0;
