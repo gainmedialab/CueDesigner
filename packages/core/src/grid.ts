@@ -144,6 +144,42 @@ export function gridResolutionLabel(res: GridResolution): string {
   }
 }
 
+/** Nice absolute-time intervals (seconds) for ruler marks. */
+const RULER_INTERVALS_SEC = [
+  0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600,
+] as const;
+
+/**
+ * Absolute-time ruler mark times, denser when the timeline is wider (zoomed).
+ * Targets ~`targetPx` pixels between marks given `contentWidthPx`.
+ */
+export function rulerMarkTimes(
+  durationSec: number,
+  contentWidthPx: number,
+  targetPx = 80,
+): number[] {
+  if (!(durationSec > 0) || !(contentWidthPx > 0)) return [];
+  const idealSec = (targetPx / contentWidthPx) * durationSec;
+  let interval = RULER_INTERVALS_SEC[RULER_INTERVALS_SEC.length - 1]!;
+  for (const candidate of RULER_INTERVALS_SEC) {
+    if (candidate >= idealSec) {
+      interval = candidate;
+      break;
+    }
+  }
+  const marks: number[] = [];
+  const end = Math.ceil(durationSec / interval);
+  for (let i = 0; i <= end; i++) {
+    const t = i * interval;
+    if (t > durationSec + 1e-9) break;
+    marks.push(Math.min(durationSec, t));
+  }
+  if (marks.length === 0 || marks[marks.length - 1]! < durationSec - 1e-6) {
+    marks.push(durationSec);
+  }
+  return marks;
+}
+
 /**
  * Visible grid line times from start..end (inclusive of lines in range).
  * Caps count so dense resolutions stay drawable.

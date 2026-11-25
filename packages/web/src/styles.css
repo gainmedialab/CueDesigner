@@ -225,6 +225,29 @@ input[type="color"] {
   background: var(--bg);
 }
 
+.zoom-field {
+  gap: 0.35rem;
+}
+
+.zoom-btn {
+  padding: 0.15rem 0.5rem;
+  min-width: 1.75rem;
+  line-height: 1.2;
+}
+
+.zoom-slider {
+  width: 7rem;
+  accent-color: var(--accent);
+}
+
+.zoom-value {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text);
+  min-width: 2.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .grid-line {
   position: absolute;
   top: 0;
@@ -342,17 +365,45 @@ input[type="color"] {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 0.75rem;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%),
     var(--bg);
 }
 
+.timeline-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.timeline-content {
+  min-width: 100%;
+  position: relative;
+}
+
+.ruler-row {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: var(--bg);
+}
+
+.ruler-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 7;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
 .ruler {
   position: relative;
-  height: 28px;
-  margin-left: 100px;
+  height: 32px;
   border-bottom: 1px solid var(--border);
   font-family: var(--mono);
   font-size: 0.65rem;
@@ -366,6 +417,7 @@ input[type="color"] {
   border-left: 1px solid var(--border);
   height: 100%;
   padding-left: 4px;
+  white-space: nowrap;
 }
 
 .tracks {
@@ -391,6 +443,12 @@ input[type="color"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%),
+    var(--bg);
 }
 
 .track-lane {
@@ -399,6 +457,7 @@ input[type="color"] {
   border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
+  min-width: 0;
 }
 
 .waveform {

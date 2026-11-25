@@ -76,8 +76,11 @@ Use the **BPM bar** under transport:
 | **Downbeat** | Offset of bar 1 beat 1 from file start (seconds) |
 | **Snap** | Grid resolution: Bar, Beat, 1/4, 1/8, 1/16, 1/32 |
 | **Magnetic snap** | When on, place/drag snaps to the grid |
+| **Zoom** | Timeline horizontal zoom (`−` / slider / `+`); denser ruler labels when zoomed |
 
-**Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid; the clock also shows a musical **bar.beat** stub. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`).
+**Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid; the clock also shows a musical **bar.beat** stub. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`, `timelineZoom`).
+
+**Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 
 LTC/MTC, export packs, and a full absolute/TC/musical ruler switch are deferred.
 
@@ -107,6 +110,7 @@ Folder / sidecar packages (copy media next to JSON) are planned for a later phas
       "downbeatOffsetSec": 0,
       "gridResolution": "1/4",
       "snapEnabled": true,
+      "timelineZoom": 1,
       "fps": "25"
     },
     "departments": [],

@@ -1,4 +1,4 @@
-import { defaultSettings } from "./project.js";
+import { clampTimelineZoom, defaultSettings } from "./project.js";
 import {
   PROJECT_SCHEMA_VERSION,
   type GridResolution,
@@ -51,6 +51,10 @@ function normalizeSettings(raw: unknown): ProjectSettings {
       : defaults.gridResolution;
   const snapEnabled =
     typeof s.snapEnabled === "boolean" ? s.snapEnabled : defaults.snapEnabled;
+  const timelineZoom =
+    typeof s.timelineZoom === "number" && Number.isFinite(s.timelineZoom)
+      ? clampTimelineZoom(s.timelineZoom)
+      : defaults.timelineZoom;
   const fps =
     typeof s.fps === "string" ? (s.fps as ProjectSettings["fps"]) : defaults.fps;
   const showTcOffsetSec =
@@ -63,6 +67,7 @@ function normalizeSettings(raw: unknown): ProjectSettings {
     downbeatOffsetSec,
     gridResolution,
     snapEnabled,
+    timelineZoom,
     fps,
     showTcOffsetSec,
   };

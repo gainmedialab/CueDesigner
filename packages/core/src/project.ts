@@ -6,6 +6,12 @@ import {
   type ProjectSettings,
 } from "./types.js";
 
+/** Clamp timeline zoom to a practical range (1 = fit, higher = denser). */
+export function clampTimelineZoom(zoom: number): number {
+  if (!Number.isFinite(zoom) || zoom < 1) return 1;
+  return Math.min(64, zoom);
+}
+
 export function defaultSettings(): ProjectSettings {
   return {
     bpm: 120,
@@ -13,6 +19,7 @@ export function defaultSettings(): ProjectSettings {
     downbeatOffsetSec: 0,
     gridResolution: "1/4",
     snapEnabled: true,
+    timelineZoom: 1,
     fps: "25",
     showTcOffsetSec: 0,
   };
