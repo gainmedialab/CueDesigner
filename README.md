@@ -1,6 +1,6 @@
 # CueDesigner
 
-Timecode-controlled live-show cue programmer (desktop + web). Phase 0 foundations: project model, audio import/transport, department tracks, cue CRUD, offline JSON save/load with media restore.
+Timecode-controlled live-show cue programmer (desktop + web). Phase 0 foundations plus Phase 1 BPM magnetic snap: project model, audio import/transport, department tracks, cue CRUD, BPM/grid snap, offline JSON save/load with media restore.
 
 **Planning and export only. This software does not arm, enable, or fire pyrotechnic or SFX hardware.**
 
@@ -65,6 +65,22 @@ npm run typecheck
 - **Cues:** Place at playhead or double-click track; select, drag-move, edit, delete; per-department cue numbers + global ordinal
 - **Shell:** Electron loads the same web UI / schema on macOS
 
+## BPM + magnetic snap (Phase 1)
+
+Use the **BPM bar** under transport:
+
+| Control | What it does |
+|---------|----------------|
+| **BPM** | Project tempo (quarter-note metronome) |
+| **Time sig** | Beats per bar / beat unit (e.g. 4/4) |
+| **Downbeat** | Offset of bar 1 beat 1 from file start (seconds) |
+| **Snap** | Grid resolution: Bar, Beat, 1/4, 1/8, 1/16, 1/32 |
+| **Magnetic snap** | When on, place/drag snaps to the grid |
+
+**Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid; the clock also shows a musical **bar.beat** stub. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`).
+
+LTC/MTC, export packs, and a full absolute/TC/musical ruler switch are deferred.
+
 ## Save / Open and media (offline-first)
 
 CueDesigner never uploads project or audio data. Everything stays on the machine (browser download + IndexedDB, or the same Chromium store inside Electron).
@@ -85,7 +101,14 @@ Folder / sidecar packages (copy media next to JSON) are planned for a later phas
   "project": {
     "schemaVersion": 1,
     "name": "Untitled Show",
-    "settings": { "bpm": 120, "fps": "25", "...": "..." },
+    "settings": {
+      "bpm": 120,
+      "timeSignature": [4, 4],
+      "downbeatOffsetSec": 0,
+      "gridResolution": "1/4",
+      "snapEnabled": true,
+      "fps": "25"
+    },
     "departments": [],
     "cues": [],
     "media": { "name": "track.wav", "durationSec": 600, "mimeType": "audio/wav" }
@@ -94,7 +117,7 @@ Folder / sidecar packages (copy media next to JSON) are planned for a later phas
 }
 ```
 
-Canonical cue time is **file-relative absolute seconds**. Show TC and musical views are Phase 1.
+Canonical cue time is **file-relative absolute seconds**. Musical **bar.beat** is shown as a derived view from BPM + downbeat; show TC and a full ruler mode switch come later.
 
 ## License
 

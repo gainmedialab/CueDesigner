@@ -8,6 +8,10 @@ import {
   deleteCuesForDepartment,
   deserializeProject,
   formatAbsoluteTime,
+  formatMusicalPosition,
+  GRID_RESOLUTIONS,
+  gridLineTimes,
+  gridResolutionLabel,
   moveCue,
   nextDeptCueNumber,
   placeCue,
@@ -15,9 +19,12 @@ import {
   renameDepartment,
   recolorDepartment,
   setProjectMedia,
+  snapToGrid,
   touchProject,
   updateCue,
+  updateSettings,
   type Cue,
+  type GridResolution,
   type Project,
 } from "@cuedesigner/core";
 import {
@@ -40,6 +47,16 @@ import {
 } from "./mediaStore";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
+
+/** Snap unless Alt/Option is held, or project snap is disabled. */
+function applySnap(
+  t: number,
+  settings: Project["settings"],
+  bypass: boolean,
+): number {
+  if (bypass || !settings.snapEnabled) return Math.max(0, t);
+  return snapToGrid(t, settings);
+}
 
 export function App() {
   const [project, setProject] = useState<Project>(() => createProject("Untitled Show"));
@@ -327,11 +344,12 @@ export function App() {
     setStatus("New project created.");
   };
 
-  const placeAtPlayhead = () => {
+  const placeAtPlayhead = (bypassSnap = false) => {
     if (!activeDeptId) return;
+    const tAbs = applySnap(currentTime, project.settings, bypassSnap);
     const draft = createCue({
       id: createId(),
-      tAbs: currentTime,
+      tAbs,
       departmentId: activeDeptId,
       cueNoDept: nextDeptCueNumber(project.cues, activeDeptId),
       label: "Cue",
@@ -340,19 +358,25 @@ export function App() {
       touchProject({ ...p, cues: placeCue(p.cues, draft) }),
     );
     setSelectedCueId(draft.id);
-    setStatus(`Placed cue at ${formatAbsoluteTime(currentTime)}`);
+    const musical = formatMusicalPosition(tAbs, project.settings);
+    setStatus(
+      `Placed cue at ${formatAbsoluteTime(tAbs)} (${musical})${
+        bypassSnap || !project.settings.snapEnabled ? " — free" : " — snapped"
+      }`,
+    );
   };
 
   const onLanePointer = (e: ReactPointerEvent<HTMLDivElement>, deptId: string) => {
     const lane = e.currentTarget;
     const rect = lane.getBoundingClientRect();
     const ratio = (e.clientX - rect.left) / rect.width;
-    const t = ratio * (duration || 1);
+    const rawT = ratio * (duration || 1);
     if (e.detail === 2) {
-      // double-click places cue
+      // double-click places cue (Alt bypasses snap)
+      const tAbs = applySnap(rawT, project.settings, e.altKey);
       const draft = createCue({
         id: createId(),
-        tAbs: t,
+        tAbs,
         departmentId: deptId,
         cueNoDept: nextDeptCueNumber(project.cues, deptId),
       });
@@ -363,7 +387,7 @@ export function App() {
       setActiveDeptId(deptId);
       return;
     }
-    seek(t);
+    seek(rawT);
     setActiveDeptId(deptId);
   };
 
@@ -392,13 +416,14 @@ export function App() {
       const rect = lane.getBoundingClientRect();
       const width = rect.width || 1;
       const pointerT = ((ev.clientX - rect.left) / width) * (duration || 1);
-      const t = Math.max(0, Math.min(duration || 1, pointerT - grabOffsetT));
-      setProject((p) =>
-        touchProject({
+      const raw = Math.max(0, Math.min(duration || 1, pointerT - grabOffsetT));
+      setProject((p) => {
+        const t = applySnap(raw, p.settings, ev.altKey);
+        return touchProject({
           ...p,
           cues: moveCue(p.cues, dragCueIdRef.current!, t),
-        }),
-      );
+        });
+      });
     };
     const onUp = () => {
       dragCueIdRef.current = null;
@@ -414,6 +439,12 @@ export function App() {
   const playheadPct =
     duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
 
+  const gridLines =
+    duration > 0 ? gridLineTimes(project.settings, duration) : [];
+
+  const musicalNow = formatMusicalPosition(currentTime, project.settings);
+  const [sigNum, sigDen] = project.settings.timeSignature;
+
   return (
     <div className="app">
       <header className="topbar">
@@ -423,6 +454,7 @@ export function App() {
         <div className="meta">
           {project.name}
           {project.media ? ` · ${project.media.name}` : " · no media"}
+          {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen}`}
         </div>
         <div className="actions">
           <button type="button" onClick={onNewProject}>
@@ -465,7 +497,12 @@ export function App() {
         <button type="button" onClick={() => seek(0)} disabled={!mediaUrl}>
           ⇤
         </button>
-        <span className="clock">{formatAbsoluteTime(currentTime)}</span>
+        <div className="clock-block">
+          <span className="clock">{formatAbsoluteTime(currentTime)}</span>
+          <span className="clock-musical" title="Musical position (bar.beat)">
+            {musicalNow}
+          </span>
+        </div>
         <input
           className="scrub"
           type="range"
@@ -479,9 +516,124 @@ export function App() {
         <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
           {formatAbsoluteTime(duration)}
         </span>
-        <button type="button" onClick={placeAtPlayhead} disabled={!activeDeptId}>
+        <button
+          type="button"
+          onClick={(e) => placeAtPlayhead(e.altKey)}
+          disabled={!activeDeptId}
+          title="Place cue at playhead (hold Alt for free placement)"
+        >
           Cue at playhead
         </button>
+      </div>
+
+      <div className="grid-bar" aria-label="BPM and snap settings">
+        <label className="grid-field">
+          BPM
+          <input
+            type="number"
+            min={20}
+            max={400}
+            step={0.1}
+            value={project.settings.bpm}
+            onChange={(e) => {
+              const bpm = Number(e.target.value);
+              if (!Number.isFinite(bpm) || bpm <= 0) return;
+              setProject((p) => updateSettings(p, { bpm }));
+            }}
+          />
+        </label>
+        <label className="grid-field">
+          Time sig
+          <span className="time-sig">
+            <input
+              type="number"
+              min={1}
+              max={32}
+              value={sigNum}
+              aria-label="Beats per bar"
+              onChange={(e) => {
+                const n = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(n) || n <= 0) return;
+                setProject((p) =>
+                  updateSettings(p, {
+                    timeSignature: [n, p.settings.timeSignature[1]],
+                  }),
+                );
+              }}
+            />
+            <span>/</span>
+            <input
+              type="number"
+              min={1}
+              max={32}
+              value={sigDen}
+              aria-label="Beat unit"
+              onChange={(e) => {
+                const d = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(d) || d <= 0) return;
+                setProject((p) =>
+                  updateSettings(p, {
+                    timeSignature: [p.settings.timeSignature[0], d],
+                  }),
+                );
+              }}
+            />
+          </span>
+        </label>
+        <label className="grid-field">
+          Downbeat
+          <input
+            type="number"
+            min={0}
+            step={0.001}
+            value={project.settings.downbeatOffsetSec}
+            title="Downbeat offset from file start (seconds)"
+            onChange={(e) => {
+              const downbeatOffsetSec = Number(e.target.value);
+              if (!Number.isFinite(downbeatOffsetSec)) return;
+              setProject((p) =>
+                updateSettings(p, {
+                  downbeatOffsetSec: Math.max(0, downbeatOffsetSec),
+                }),
+              );
+            }}
+          />
+          <span className="unit">s</span>
+        </label>
+        <label className="grid-field">
+          Snap
+          <select
+            value={project.settings.gridResolution}
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, {
+                  gridResolution: e.target.value as GridResolution,
+                }),
+              )
+            }
+          >
+            {GRID_RESOLUTIONS.map((res) => (
+              <option key={res} value={res}>
+                {gridResolutionLabel(res)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid-field checkbox">
+          <input
+            type="checkbox"
+            checked={project.settings.snapEnabled}
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, { snapEnabled: e.target.checked }),
+              )
+            }
+          />
+          Magnetic snap
+        </label>
+        <span className="grid-hint">
+          Hold <kbd>Alt</kbd> while placing or dragging to bypass snap
+        </span>
       </div>
 
       <div className="workspace">
@@ -593,7 +745,10 @@ export function App() {
               </>
             )}
           </div>
-          <p className="hint">Double-click a track to place a cue.</p>
+          <p className="hint">
+            Double-click a track to place a cue. Hold Alt for free (unsnapped)
+            placement.
+          </p>
         </aside>
 
         <main className="timeline-wrap">
@@ -605,6 +760,9 @@ export function App() {
                 return (
                   <span key={i} className="ruler-mark" style={{ left: `${pct}%` }}>
                     {formatAbsoluteTime(t)}
+                    <span className="ruler-musical">
+                      {formatMusicalPosition(t, project.settings)}
+                    </span>
                   </span>
                 );
               })}
@@ -623,6 +781,15 @@ export function App() {
                   {idx === 0 && peaks && (
                     <canvas ref={waveCanvasRef} className="waveform" />
                   )}
+                  {gridLines.map((line, lineIdx) => (
+                    <div
+                      key={`${line.kind}-${lineIdx}-${line.t}`}
+                      className={`grid-line grid-line--${line.kind}`}
+                      style={{
+                        left: `${duration > 0 ? (line.t / duration) * 100 : 0}%`,
+                      }}
+                    />
+                  ))}
                   {project.cues
                     .filter((c) => c.departmentId === d.id)
                     .map((c) => {
@@ -633,7 +800,7 @@ export function App() {
                           key={c.id}
                           className={`cue-marker${c.id === selectedCueId ? " selected" : ""}`}
                           style={{ left, background: d.color }}
-                          title={`${c.cueNoDept} ${c.label}`}
+                          title={`${c.cueNoDept} ${c.label} · ${formatAbsoluteTime(c.tAbs)} · ${formatMusicalPosition(c.tAbs, project.settings)}`}
                           onPointerDown={(e) => onCuePointerDown(e, c)}
                         />
                       );
@@ -746,6 +913,27 @@ export function App() {
                   }
                 />
               </label>
+              <div className="inspector-meta">
+                Musical:{" "}
+                {formatMusicalPosition(selectedCue.tAbs, project.settings)}
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setProject((p) =>
+                    touchProject({
+                      ...p,
+                      cues: moveCue(
+                        p.cues,
+                        selectedCue.id,
+                        snapToGrid(selectedCue.tAbs, p.settings),
+                      ),
+                    }),
+                  )
+                }
+              >
+                Snap to grid
+              </button>
               <button
                 type="button"
                 className="danger"

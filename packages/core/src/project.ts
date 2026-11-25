@@ -11,9 +11,21 @@ export function defaultSettings(): ProjectSettings {
     bpm: 120,
     timeSignature: [4, 4],
     downbeatOffsetSec: 0,
+    gridResolution: "1/4",
+    snapEnabled: true,
     fps: "25",
     showTcOffsetSec: 0,
   };
+}
+
+export function updateSettings(
+  project: Project,
+  patch: Partial<ProjectSettings>,
+): Project {
+  return touchProject({
+    ...project,
+    settings: { ...project.settings, ...patch },
+  });
 }
 
 export function createId(): string {

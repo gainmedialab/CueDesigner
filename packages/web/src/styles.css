@@ -88,7 +88,7 @@ input[type="color"] {
 
 .app {
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr auto;
   height: 100%;
   min-height: 0;
 }
@@ -141,9 +141,122 @@ input[type="color"] {
   min-width: 7.5rem;
 }
 
+.clock-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 7.5rem;
+}
+
+.clock-musical {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .scrub {
   flex: 1;
   accent-color: var(--playhead);
+}
+
+.grid-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.85rem 1.1rem;
+  padding: 0.5rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(18, 24, 32, 0.95);
+}
+
+.grid-field {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.grid-field input[type="number"] {
+  width: 4.5rem;
+}
+
+.grid-field select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.45rem;
+  min-width: 5rem;
+}
+
+.grid-field.checkbox {
+  gap: 0.35rem;
+  color: var(--text);
+}
+
+.grid-field .unit {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.time-sig {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.time-sig input {
+  width: 2.75rem;
+}
+
+.grid-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.grid-hint kbd {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  background: var(--bg);
+}
+
+.grid-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  pointer-events: none;
+  z-index: 1;
+  margin-left: -0.5px;
+}
+
+.grid-line--bar {
+  background: rgba(232, 237, 245, 0.28);
+}
+
+.grid-line--beat {
+  background: rgba(232, 237, 245, 0.14);
+}
+
+.grid-line--sub {
+  background: rgba(232, 237, 245, 0.07);
+}
+
+.ruler-musical {
+  display: block;
+  opacity: 0.65;
+  font-size: 0.6rem;
+}
+
+.inspector-meta {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
 .workspace {

@@ -58,11 +58,24 @@ export interface Cue {
   fields?: Record<string, string | number | boolean>;
 }
 
+/** Magnetic grid resolution for cue snap / overlay. */
+export type GridResolution =
+  | "bar"
+  | "beat"
+  | "1/4"
+  | "1/8"
+  | "1/16"
+  | "1/32";
+
 export interface ProjectSettings {
   bpm: number;
   timeSignature: [number, number];
   /** Downbeat offset in seconds from file start */
   downbeatOffsetSec: number;
+  /** Subdivision for magnetic snap and visible grid */
+  gridResolution: GridResolution;
+  /** When true, place/move snaps to grid (modifier key still bypasses) */
+  snapEnabled: boolean;
   fps: FrameRateLabel;
   /** Show timecode offset from file-relative zero */
   showTcOffsetSec: number;
