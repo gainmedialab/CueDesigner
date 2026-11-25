@@ -418,8 +418,8 @@ export function App() {
       // Clear scroll suspension; checkbox preference stays latched.
       setFollowSuspended(false);
       try {
-        // Start media immediately (native element). Click AudioContext resume
-        // is non-blocking — never await click priming before audio.play().
+        // Start media immediately (native element). Click pool unlock is
+        // non-blocking — never await click priming before audio.play().
         const playP = audio.play();
         void metronomeRef.current?.resume();
         await playP;
@@ -1062,8 +1062,7 @@ export function App() {
             checked={project.settings.metronomeEnabled}
             onChange={(e) => {
               const on = e.target.checked;
-              // Apply + gesture audition (HTMLAudio once). Play-path clicks
-              // use Web Audio buffers — HTMLAudio-per-beat hitching transport.
+              // Apply + gesture audition / pool unlock (HTMLAudio).
               metronomeRef.current?.setEnabled(on);
               if (on) metronomeRef.current?.auditionSync();
               setProject((p) =>

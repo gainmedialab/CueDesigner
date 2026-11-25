@@ -220,24 +220,24 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-/** Deterministic mono click PCM (peak-normalized). */
+/** Deterministic mono click PCM (peak-normalized). Short = frees pool slots fast. */
 function synthesizeClickPcm(
   sampleRate: number,
   freqHz: number,
   peak: number,
-  durSec = 0.045,
+  durSec = 0.032,
 ): Float32Array {
   const n = Math.max(1, Math.floor(sampleRate * durSec));
   const pcm = new Float32Array(n);
   let maxAbs = 0;
   for (let i = 0; i < n; i++) {
     const t = i / sampleRate;
-    const env = Math.exp(-t * 60);
+    const env = Math.exp(-t * 70);
     const tone =
       Math.sin(2 * Math.PI * freqHz * t) * 0.85 +
       Math.sin(2 * Math.PI * freqHz * 2 * t) * 0.15;
     const noise =
-      i < sampleRate * 0.002
+      i < sampleRate * 0.0015
         ? (((i * 1103515245 + 12345) & 0xffff) / 0xffff) * 0.5 - 0.25
         : 0;
     const s = (tone + noise) * env;
@@ -252,7 +252,6 @@ function synthesizeClickPcm(
   return pcm;
 }
 
-/** data: WAV for gesture audition only (never on the Play/RAF path). */
 function pcmToDataUri(pcm: Float32Array, sampleRate: number): string {
   const n = pcm.length;
   const dataSize = n * 2;
@@ -280,32 +279,34 @@ function pcmToDataUri(pcm: Float32Array, sampleRate: number): string {
   return `data:audio/wav;base64,${bytesToBase64(new Uint8Array(buf))}`;
 }
 
-const AUDITION_SR = 44100;
-const AUDITION_URI_HIGH = pcmToDataUri(
-  synthesizeClickPcm(AUDITION_SR, 1600, 1),
-  AUDITION_SR,
-);
+const CLICK_SR = 44100;
+/** Module-level samples — built once, never on the Play/RAF path. */
+const CLICK_URI_HIGH = pcmToDataUri(synthesizeClickPcm(CLICK_SR, 1600, 1), CLICK_SR);
+const CLICK_URI_LOW = pcmToDataUri(synthesizeClickPcm(CLICK_SR, 1000, 0.9), CLICK_SR);
 
 /**
  * Schedules short clicks on the musical beat grid while media plays.
  *
  * Media stays on native HTMLMediaElement (no MES).
  *
- * Play-path clicks use a dedicated AudioContext + AudioBufferSourceNode
- * look-ahead schedule. HTMLAudioElement pool play/seek on every beat was
- * audible but froze the playhead/timer (~0.5s) — that path is gone.
- * Gesture audition still uses one HTMLAudioElement under the Click checkbox
- * (never during RAF transport). Prefer smooth transport over audible click.
- *
- * `resume()` must not gate media.play(). No lockToMediaClock on Play.
+ * Web Audio → destination is silent in the user's browser; HTMLAudio works
+ * for speakers but pause/seek/play thrash previously froze the playhead.
+ * Play-path strategy: preloaded HTMLAudio pool, **never pause()** on the beat
+ * path, reuse only free (paused/ended) elements, seek to 0 only when needed,
+ * skip the beat if the pool is busy. One-time muted unlock under Play/Click
+ * gesture via `resume()` / `auditionSync()` (must not gate media.play()).
  */
 export class Metronome {
-  private ctx: AudioContext | null = null;
-  private master: GainNode | null = null;
-  private bufHigh: AudioBuffer | null = null;
-  private bufLow: AudioBuffer | null = null;
-  private pendingSources: AudioBufferSourceNode[] = [];
+  private poolHigh: HTMLAudioElement[] = [];
+  private poolLow: HTMLAudioElement[] = [];
+  private cursorHigh = 0;
+  private cursorLow = 0;
+  private readonly poolPerAccent = 6;
+  private unlocked = false;
+  private unlockInflight: Promise<void> | null = null;
   private timer: number | null = null;
+  private pendingTimeouts: number[] = [];
+  private schedulerEpoch = 0;
   private nextBeatIndex = 0;
   private enabled = false;
   private volume = 0.5;
@@ -316,8 +317,9 @@ export class Metronome {
     downbeatOffsetSec: 0,
   };
   private getMediaTime: () => number = () => 0;
-  private readonly scheduleHorizonSec = 0.25;
-  /** Diagnostics: BufferSource starts. */
+  private scheduledBeats = new Set<number>();
+  private readonly scheduleHorizonSec = 0.22;
+  /** Diagnostics: successful element.play() attempts. */
   clicksStarted = 0;
 
   setEnabled(on: boolean): void {
@@ -334,13 +336,6 @@ export class Metronome {
 
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(1, v));
-    if (this.master && this.ctx) {
-      this.master.gain.setTargetAtTime(
-        this.volume,
-        this.ctx.currentTime,
-        0.02,
-      );
-    }
   }
 
   setGrid(grid: MetronomeGrid): void {
@@ -364,8 +359,6 @@ export class Metronome {
   setPlaying(playing: boolean): void {
     this.playing = playing;
     if (playing) {
-      // Non-blocking context prime — never await before media.play().
-      void this.ensureCtx();
       if (this.enabled) this.startScheduler();
     } else {
       this.stopScheduler();
@@ -373,16 +366,18 @@ export class Metronome {
   }
 
   /**
-   * Compatibility with App togglePlay — fire-and-forget context resume.
-   * Must not delay or gate media.play().
+   * Under Play / Click gesture: ensure pool + one-time muted unlock.
+   * Must not delay or gate media.play() (App calls this with void).
    */
   async resume(): Promise<void> {
-    await this.ensureCtx();
+    this.ensurePool();
+    await this.unlockPool();
   }
 
   /** Call after seeks so clicks re-lock to media time. */
   resync(): void {
     this.clearPending();
+    this.scheduledBeats.clear();
     this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
   }
 
@@ -392,71 +387,87 @@ export class Metronome {
   }
 
   /**
-   * Fire one HTMLAudio click under the current user gesture (no await).
-   * Not used on the Play/RAF path — avoids playhead hitching.
+   * Fire one click under the current user gesture (no await).
+   * Uses a one-shot element so it cannot race muted pool unlock.
+   * Also primes / unlocks the pool for later scheduled plays.
    */
   auditionSync(): void {
+    this.ensurePool();
     try {
-      const el = new Audio(AUDITION_URI_HIGH);
-      el.volume = Math.max(0.85, this.volume);
+      const el = new Audio(CLICK_URI_HIGH);
+      el.volume = Math.max(this.volume, 0.85);
       void el.play().catch(() => {
-        // autoplay blocked — ignore
+        // ignore
       });
     } catch {
       // ignore
     }
-    // Also prime Web Audio under the same gesture (non-blocking).
-    void this.ensureCtx().then((ctx) => {
-      if (!this.bufHigh || !this.master) return;
-      this.scheduleBufferClick(ctx.currentTime, true, Math.max(0.85, this.volume));
-    });
+    void this.unlockPool();
   }
 
   dispose(): void {
     this.stopScheduler();
     this.clearPending();
-    const ctx = this.ctx;
-    this.ctx = null;
-    this.master = null;
-    this.bufHigh = null;
-    this.bufLow = null;
-    if (ctx) void ctx.close();
-  }
-
-  private getOrCreateCtx(): AudioContext {
-    if (!this.ctx) {
-      const Ctx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext })
-          .webkitAudioContext;
-      this.ctx = new Ctx();
-      this.master = this.ctx.createGain();
-      this.master.gain.value = this.volume;
-      this.master.connect(this.ctx.destination);
-      this.bufHigh = this.makeBuffer(1600, 1);
-      this.bufLow = this.makeBuffer(1000, 0.9);
-    }
-    return this.ctx;
-  }
-
-  private async ensureCtx(): Promise<AudioContext> {
-    const ctx = this.getOrCreateCtx();
-    if (ctx.state === "suspended") {
+    this.scheduledBeats.clear();
+    for (const el of [...this.poolHigh, ...this.poolLow]) {
       try {
-        await ctx.resume();
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
       } catch {
-        // ignore — clicks may stay silent; transport must stay smooth
+        // ignore
       }
     }
-    return ctx;
+    this.poolHigh = [];
+    this.poolLow = [];
+    this.unlocked = false;
+    this.unlockInflight = null;
   }
 
-  private makeBuffer(freqHz: number, peak: number): AudioBuffer {
-    const ctx = this.ctx!;
-    const pcm = synthesizeClickPcm(ctx.sampleRate, freqHz, peak);
-    const buf = ctx.createBuffer(1, pcm.length, ctx.sampleRate);
-    buf.getChannelData(0).set(pcm);
-    return buf;
+  private ensurePool(): void {
+    if (this.poolHigh.length > 0 && this.poolLow.length > 0) return;
+    this.poolHigh = [];
+    this.poolLow = [];
+    for (let i = 0; i < this.poolPerAccent; i++) {
+      const hi = new Audio(CLICK_URI_HIGH);
+      hi.preload = "auto";
+      const lo = new Audio(CLICK_URI_LOW);
+      lo.preload = "auto";
+      this.poolHigh.push(hi);
+      this.poolLow.push(lo);
+    }
+  }
+
+  /**
+   * One-time muted play/pause so timer-scheduled play() is allowed.
+   * Only unlocks two representatives — unlocking the whole pool (12×)
+   * contended with media and wobbling the clock at Play start.
+   */
+  private async unlockPool(): Promise<void> {
+    this.ensurePool();
+    if (this.unlocked) return;
+    if (this.unlockInflight) return this.unlockInflight;
+    this.unlockInflight = (async () => {
+      const sample = [this.poolHigh[0], this.poolLow[0]].filter(
+        (el): el is HTMLAudioElement => !!el,
+      );
+      for (const el of sample) {
+        el.muted = true;
+        el.volume = 0;
+        try {
+          await el.play();
+          el.pause();
+          el.currentTime = 0;
+        } catch {
+          // ignore — site engagement / audition may still unlock
+        }
+        el.muted = false;
+      }
+      this.unlocked = true;
+    })().finally(() => {
+      this.unlockInflight = null;
+    });
+    return this.unlockInflight;
   }
 
   private beatDurationSec(): number {
@@ -481,47 +492,32 @@ export class Metronome {
   private startScheduler(): void {
     this.stopScheduler();
     if (!this.playing || !this.enabled) return;
-    // Sync start — do not await ctx; tick no-ops until running.
-    void this.ensureCtx();
+    this.ensurePool();
+    // Non-blocking unlock — never await before media already playing.
+    void this.unlockPool();
+    this.scheduledBeats.clear();
     this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
-    // Low-frequency look-ahead; AudioContext does the precise starts.
     this.timer = window.setInterval(() => this.tick(), 50);
     this.tick();
   }
 
   private stopScheduler(): void {
+    this.schedulerEpoch += 1;
     if (this.timer != null) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.clearPending();
+    this.scheduledBeats.clear();
   }
 
   private clearPending(): void {
-    for (const src of this.pendingSources) {
-      try {
-        src.stop();
-      } catch {
-        // already stopped
-      }
-      try {
-        src.disconnect();
-      } catch {
-        // already disconnected
-      }
-    }
-    this.pendingSources = [];
+    for (const id of this.pendingTimeouts) clearTimeout(id);
+    this.pendingTimeouts = [];
   }
 
   private tick(): void {
-    const ctx = this.ctx;
-    const master = this.master;
-    if (!ctx || !master || !this.enabled || !this.playing) return;
-    if (!this.bufHigh || !this.bufLow) return;
-    if (ctx.state !== "running") {
-      void ctx.resume();
-      return;
-    }
+    if (!this.enabled || !this.playing) return;
 
     const beatSec = this.beatDurationSec();
     if (!(beatSec > 0)) return;
@@ -536,63 +532,103 @@ export class Metronome {
       this.nextBeatIndex = want;
     }
     const until = mediaNow + this.scheduleHorizonSec;
-    const ctxNow = ctx.currentTime;
 
     while (true) {
       const beatIndex = this.nextBeatIndex;
       const tAbs = origin + beatIndex * beatSec;
       if (tAbs > until) break;
-      if (tAbs < 0 || tAbs < mediaNow - 0.002) {
+      if (tAbs < 0 || tAbs < mediaNow - 0.012) {
         this.nextBeatIndex += 1;
         if (this.nextBeatIndex > 1e7) break;
         continue;
       }
-      const when = ctxNow + (tAbs - mediaNow);
-      if (when <= ctxNow + this.scheduleHorizonSec + 0.05) {
-        const beatInBar = ((beatIndex % bpb) + bpb) % bpb;
-        const level = beatInBar === 0 ? 1 : 0.55;
-        this.scheduleBufferClick(when, beatInBar === 0, this.volume * level);
+      if (this.scheduledBeats.has(beatIndex)) {
+        this.nextBeatIndex += 1;
+        continue;
       }
+      const beatInBar = ((beatIndex % bpb) + bpb) % bpb;
+      const delayMs = Math.max(0, (tAbs - mediaNow) * 1000);
+      this.scheduleElementClick(delayMs, beatInBar === 0, beatIndex);
       this.nextBeatIndex += 1;
       if (this.nextBeatIndex > 1e7) break;
     }
+
+    // Bound set growth during long plays.
+    if (this.scheduledBeats.size > 64) {
+      const keepFrom = want - 2;
+      for (const b of [...this.scheduledBeats]) {
+        if (b < keepFrom) this.scheduledBeats.delete(b);
+      }
+    }
   }
 
-  private scheduleBufferClick(
-    when: number,
+  private scheduleElementClick(
+    delayMs: number,
     downbeat: boolean,
-    vol: number,
+    beatIndex: number,
   ): void {
-    const ctx = this.ctx;
-    const master = this.master;
-    const buf = downbeat ? this.bufHigh : this.bufLow;
-    if (!ctx || !master || !buf) return;
+    this.scheduledBeats.add(beatIndex);
+    const level = downbeat ? 1 : 0.7;
+    if (delayMs <= 6) {
+      this.fireClick(downbeat, this.volume * level);
+      return;
+    }
+    const epoch = this.schedulerEpoch;
+    const id = window.setTimeout(() => {
+      const i = this.pendingTimeouts.indexOf(id);
+      if (i >= 0) this.pendingTimeouts.splice(i, 1);
+      if (epoch !== this.schedulerEpoch) return;
+      if (!this.enabled || !this.playing) return;
+      this.fireClick(downbeat, this.volume * level);
+    }, delayMs);
+    this.pendingTimeouts.push(id);
+  }
+
+  /**
+   * Thrash-free fire: never pause() a pool element on the beat path.
+   * Only reuse free (paused/ended) slots; skip the beat if all busy.
+   */
+  private fireClick(downbeat: boolean, vol: number): void {
+    this.ensurePool();
     const v = Math.max(0, Math.min(1, vol));
     if (v <= 0.001) return;
-    const t0 = Math.max(when, ctx.currentTime);
+    const pool = downbeat ? this.poolHigh : this.poolLow;
+    if (pool.length === 0) return;
+
+    let el: HTMLAudioElement | null = null;
+    const start = downbeat ? this.cursorHigh : this.cursorLow;
+    for (let i = 0; i < pool.length; i++) {
+      const cand = pool[(start + i) % pool.length]!;
+      // Free = not currently playing. Never interrupt a playing slot.
+      if (cand.paused || cand.ended) {
+        el = cand;
+        if (downbeat) this.cursorHigh = (start + i + 1) % pool.length;
+        else this.cursorLow = (start + i + 1) % pool.length;
+        break;
+      }
+    }
+    if (!el) return; // prefer smooth over forcing a seek/pause
+
     try {
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      const gain = ctx.createGain();
-      gain.gain.value = v;
-      src.connect(gain);
-      gain.connect(master);
-      this.pendingSources.push(src);
-      src.start(t0);
-      src.stop(t0 + buf.duration + 0.01);
-      this.clicksStarted += 1;
-      src.onended = () => {
-        const i = this.pendingSources.indexOf(src);
-        if (i >= 0) this.pendingSources.splice(i, 1);
+      el.muted = false;
+      el.volume = v;
+      // Seek only when needed — avoid pause()+seek thrash that hitching transport.
+      if (!el.ended && el.currentTime > 0.0005) {
         try {
-          src.disconnect();
-          gain.disconnect();
+          el.currentTime = 0;
         } catch {
-          // already disconnected
+          // ignore seek errors
         }
-      };
+      }
+      const p = el.play();
+      this.clicksStarted += 1;
+      if (p && typeof p.then === "function") {
+        void p.catch(() => {
+          this.clicksStarted -= 1;
+        });
+      }
     } catch {
-      // schedule failed — keep transport smooth
+      // play failed — keep transport smooth
     }
   }
 }
