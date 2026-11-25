@@ -254,9 +254,11 @@ export class Metronome {
 
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(1, v));
-    if (this.master && this.ctx) {
+    // Keep the click bus at the live volume whenever we are actively clicking;
+    // never leave it at 0 after a clearPending/stop race.
+    if (this.master && this.ctx && this.playing && this.enabled) {
       this.master.gain.setTargetAtTime(
-        this.playing ? this.volume : 0,
+        this.volume,
         this.ctx.currentTime,
         0.02,
       );
@@ -321,10 +323,9 @@ export class Metronome {
    * Call after seeks and after every successful `audio.play()` (incl. Pause→Play).
    */
   lockToMediaClock(): void {
-    this.clearPending(false);
+    this.clearPending();
     this.scheduledBeats.clear();
     this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
-    if (this.playing && this.enabled) this.setClickAudible(true);
   }
 
   /** @deprecated Prefer `lockToMediaClock`. */
@@ -334,7 +335,7 @@ export class Metronome {
 
   dispose(): void {
     this.stopScheduler();
-    this.clearPending(false);
+    this.clearPending();
     this.scheduledBeats.clear();
     const ctx = this.ctx;
     this.ctx = null;
@@ -347,7 +348,8 @@ export class Metronome {
     if (!this.ctx) {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0;
+      // Start audible — scheduler/stop gates whether clicks are scheduled.
+      this.master.gain.value = this.volume;
       this.master.connect(this.ctx.destination);
     }
     return this.ctx;
@@ -382,10 +384,11 @@ export class Metronome {
   private startScheduler(): void {
     this.stopScheduler();
     const epoch = this.schedulerEpoch;
-    void this.resume().then(() => {
+    const begin = () => {
       if (epoch !== this.schedulerEpoch) return;
       if (!this.playing || !this.enabled) return;
-      this.lockToMediaClock();
+      this.scheduledBeats.clear();
+      this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
       this.setClickAudible(true);
       if (this.timer != null) {
         clearInterval(this.timer);
@@ -393,7 +396,15 @@ export class Metronome {
       }
       this.timer = window.setInterval(() => this.tick(), 25);
       this.tick();
-    });
+    };
+    // After togglePlay's await resume(), the context is already running — start
+    // synchronously so a later React setPlaying effect cannot bump the epoch
+    // and cancel an in-flight then() before the first tick.
+    if (this.ctx && this.ctx.state === "running") {
+      begin();
+    } else {
+      void this.resume().then(begin);
+    }
   }
 
   private stopScheduler(): void {
@@ -402,18 +413,13 @@ export class Metronome {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.clearPending(false);
+    this.clearPending();
     this.scheduledBeats.clear();
     this.setClickAudible(false);
   }
 
-  /** Stop pending oscillators. Optionally keep click bus unmuted (during resync). */
-  private clearPending(restoreClick: boolean): void {
-    if (this.master && this.ctx) {
-      const now = this.ctx.currentTime;
-      this.master.gain.cancelScheduledValues(now);
-      this.master.gain.setValueAtTime(0, now);
-    }
+  /** Stop pending oscillators without muting the click bus (avoids silent races). */
+  private clearPending(): void {
     for (const osc of this.pendingOsc) {
       try {
         osc.onended = null;
@@ -428,9 +434,6 @@ export class Metronome {
       }
     }
     this.pendingOsc = [];
-    if (restoreClick && this.playing && this.enabled) {
-      this.setClickAudible(true);
-    }
   }
 
   private tick(): void {

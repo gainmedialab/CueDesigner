@@ -104,6 +104,8 @@ export function App() {
     null,
   );
   const [tcOffsetDraft, setTcOffsetDraft] = useState<string | null>(null);
+  /** Local BPM field text while editing — null means show committed project BPM. */
+  const [bpmDraft, setBpmDraft] = useState<string | null>(null);
   /** Scrollport scrollLeft — drives viewport waveform redraw. */
   const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   /** User Follow preference — only the checkbox toggles this (latches across play/pause). */
@@ -481,10 +483,12 @@ export function App() {
         return;
       }
       // Media is audible immediately (native element). Arm playhead + click now.
+      // setPlaying starts the click scheduler synchronously when the context is
+      // already running — do not lockToMediaClock() here (that cleared the first
+      // scheduled ticks and raced the React playing effect).
       playingRef.current = true;
       setCurrentTime(audio.currentTime);
       metronomeRef.current?.setPlaying(true);
-      metronomeRef.current?.lockToMediaClock();
       setPlaying(true);
     } catch (err) {
       if (gen !== transportGenRef.current) return;
@@ -1034,18 +1038,31 @@ export function App() {
         <label className="grid-field">
           BPM
           <input
-            type="number"
-            min={20}
-            max={400}
-            step={1}
+            type="text"
             inputMode="numeric"
-            value={project.settings.bpm}
-            title="Whole BPM only (integer)"
+            pattern="[0-9]*"
+            value={bpmDraft ?? String(project.settings.bpm)}
+            title="Whole BPM only (integer). Clear and type, then Enter or blur to apply."
+            aria-label="BPM"
             onChange={(e) => {
-              const raw = Number(e.target.value);
-              if (!Number.isFinite(raw) || raw <= 0) return;
-              const bpm = clampBpm(raw);
-              setProject((p) => updateSettings(p, { bpm }));
+              const v = e.target.value;
+              // Allow empty / partial digits while editing; commit on blur/Enter.
+              if (v !== "" && !/^\d+$/.test(v)) return;
+              setBpmDraft(v);
+            }}
+            onBlur={() => {
+              if (bpmDraft == null) return;
+              const trimmed = bpmDraft.trim();
+              setBpmDraft(null);
+              if (trimmed === "") return;
+              const raw = Number(trimmed);
+              if (!Number.isFinite(raw)) return;
+              setProject((p) => updateSettings(p, { bpm: clampBpm(raw) }));
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              (e.target as HTMLInputElement).blur();
             }}
           />
         </label>
