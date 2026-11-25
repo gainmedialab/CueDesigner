@@ -16,6 +16,7 @@ import {
   GRID_RESOLUTIONS,
   gridLineTimes,
   gridResolutionLabel,
+  lanePercentToTime,
   moveCue,
   musicalRulerMarkTimes,
   nextDeptCueNumber,
@@ -32,6 +33,7 @@ import {
   timeDisplayModeLabel,
   timeFieldLabel,
   timeInputPlaceholder,
+  timeToLanePercent,
   touchProject,
   updateCue,
   updateSettings,
@@ -272,7 +274,7 @@ export function App() {
     if (!anchor || !el || !(duration > 0)) return;
     pendingZoomAnchorRef.current = null;
     const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
-    const laneX = (anchor.t / duration) * laneW;
+    const laneX = (timeToLanePercent(anchor.t, duration) / 100) * laneW;
     el.scrollLeft = Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX);
   }, [zoom, duration]);
 
@@ -293,7 +295,9 @@ export function App() {
       if (el && duration > 0) {
         const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
         const playheadViewX =
-          TRACK_LABEL_W + (currentTime / duration) * laneW - el.scrollLeft;
+          TRACK_LABEL_W +
+          (timeToLanePercent(currentTime, duration) / 100) * laneW -
+          el.scrollLeft;
         if (playheadViewX >= 0 && playheadViewX <= el.clientWidth) {
           cursorX = playheadViewX;
         }
@@ -321,10 +325,7 @@ export function App() {
       const contentX = el.scrollLeft + cursorX;
       const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
       const laneX = contentX - TRACK_LABEL_W;
-      const t =
-        duration > 0
-          ? Math.max(0, Math.min(duration, (laneX / laneW) * duration))
-          : 0;
+      const t = lanePercentToTime((laneX / laneW) * 100, duration);
       const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
       applyTimelineZoom(zoom * factor, { t, cursorX });
     };
@@ -558,8 +559,8 @@ export function App() {
   const onLanePointer = (e: ReactPointerEvent<HTMLDivElement>, deptId: string) => {
     const lane = e.currentTarget;
     const rect = lane.getBoundingClientRect();
-    const ratio = (e.clientX - rect.left) / rect.width;
-    const rawT = ratio * (duration || 1);
+    const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+    const rawT = lanePercentToTime(ratio * 100, duration || 1);
     if (e.detail === 2) {
       // double-click places cue (Alt bypasses snap)
       const tAbs = applySnap(rawT, project.settings, e.altKey);
@@ -606,8 +607,10 @@ export function App() {
     const startRect = lane.getBoundingClientRect();
     const startWidth = startRect.width || 1;
     // Keep grab point relative to cue time so mousedown has zero delta.
-    const pointerTAtStart =
-      ((e.clientX - startRect.left) / startWidth) * (duration || 1);
+    const pointerTAtStart = lanePercentToTime(
+      ((e.clientX - startRect.left) / startWidth) * 100,
+      duration || 1,
+    );
     const grabOffsetT = pointerTAtStart - cue.tAbs;
 
     const onMove = (ev: PointerEvent) => {
@@ -618,7 +621,10 @@ export function App() {
       }
       const rect = lane.getBoundingClientRect();
       const width = rect.width || 1;
-      const pointerT = ((ev.clientX - rect.left) / width) * (duration || 1);
+      const pointerT = lanePercentToTime(
+        ((ev.clientX - rect.left) / width) * 100,
+        duration || 1,
+      );
       const raw = Math.max(0, Math.min(duration || 1, pointerT - grabOffsetT));
       setProject((p) => {
         const t = applySnap(raw, p.settings, ev.altKey);
@@ -644,8 +650,7 @@ export function App() {
 
   const selectedCue = project.cues.find((c) => c.id === selectedCueId) ?? null;
 
-  const playheadPct =
-    duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+  const playheadPct = timeToLanePercent(currentTime, duration);
 
   const gridLines =
     duration > 0
@@ -1156,14 +1161,16 @@ export function App() {
                 <div className="ruler-gutter" aria-hidden />
                 <div className="ruler" data-mode={timeMode}>
                   {rulerMarks.map((t, i) => {
-                    const pct = duration > 0 ? (t / duration) * 100 : 0;
+                    const pct = timeToLanePercent(t, duration);
                     return (
                       <span
                         key={`${t}-${i}`}
                         className="ruler-mark"
                         style={{ left: `${pct}%` }}
                       >
-                        {formatTime(t, timeMode, project.settings)}
+                        <span className="ruler-mark-label">
+                          {formatTime(t, timeMode, project.settings)}
+                        </span>
                       </span>
                     );
                   })}
@@ -1191,17 +1198,14 @@ export function App() {
                           key={`${line.kind}-${lineIdx}-${line.t}`}
                           className={`grid-line grid-line--${line.kind}`}
                           style={{
-                            left: `${duration > 0 ? (line.t / duration) * 100 : 0}%`,
+                            left: `${timeToLanePercent(line.t, duration)}%`,
                           }}
                         />
                       ))}
                       {project.cues
                         .filter((c) => c.departmentId === d.id)
                         .map((c) => {
-                          const left =
-                            duration > 0
-                              ? `${(c.tAbs / duration) * 100}%`
-                              : "0%";
+                          const left = `${timeToLanePercent(c.tAbs, duration)}%`;
                           return (
                             <div
                               key={c.id}

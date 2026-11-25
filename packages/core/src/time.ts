@@ -99,6 +99,26 @@ export function clampTime(t: number, durationSec: number): number {
   return Math.min(Math.max(0, t), durationSec);
 }
 
+/**
+ * Shared lane x-mapping: absolute seconds → CSS `left` percent on the lane/ruler.
+ * Ruler ticks, snap grid, cues, playhead, and waveform all use this axis.
+ */
+export function timeToLanePercent(tAbs: number, durationSec: number): number {
+  if (!(durationSec > 0) || !Number.isFinite(durationSec)) return 0;
+  const t = clampTime(tAbs, durationSec);
+  return (t / durationSec) * 100;
+}
+
+/** Inverse of `timeToLanePercent` for pointer → time on the same axis. */
+export function lanePercentToTime(
+  percent: number,
+  durationSec: number,
+): number {
+  if (!(durationSec > 0) || !Number.isFinite(durationSec)) return 0;
+  const p = Number.isFinite(percent) ? percent : 0;
+  return clampTime((p / 100) * durationSec, durationSec);
+}
+
 export interface TimecodeParts {
   hours: number;
   minutes: number;

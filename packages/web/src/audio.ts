@@ -77,29 +77,39 @@ export async function loadWaveformData(
 
 /**
  * Peak buckets for a file-relative time span [startSec, endSec).
- * Each bucket maps uniformly in **timeline seconds** (same tAbs as cues/grid/playhead),
- * then samples PCM at `t * sampleRate` — not by equal sample-index blocks that
- * discard a remainder and drift vs media duration.
+ * Each bucket maps uniformly in **timeline seconds** (same tAbs as cues/grid/playhead).
+ * Sample indices use the timeline duration basis so the waveform x-axis matches
+ * `timeToLanePercent` even when HTMLMediaElement duration ≠ AudioBuffer duration.
  */
 export function peaksForTimeSpan(
   wave: WaveformData,
   startSec: number,
   endSec: number,
   buckets: number,
+  timelineDurationSec?: number,
 ): Float32Array {
   const n = Math.max(1, Math.floor(buckets));
   const peaks = new Float32Array(n);
   const span = endSec - startSec;
   if (!(span > 0) || wave.channel.length === 0) return peaks;
 
-  const { channel, sampleRate } = wave;
+  const { channel, sampleRate, bufferDurationSec } = wave;
   const len = channel.length;
+  // Prefer explicit timeline duration; fall back to decoded buffer length.
+  const axisDur =
+    timelineDurationSec != null && timelineDurationSec > 0
+      ? timelineDurationSec
+      : bufferDurationSec > 0
+        ? bufferDurationSec
+        : len / sampleRate;
+  if (!(axisDur > 0)) return peaks;
 
   for (let i = 0; i < n; i++) {
     const t0 = startSec + (i / n) * span;
     const t1 = startSec + ((i + 1) / n) * span;
-    let s0 = Math.floor(t0 * sampleRate);
-    let s1 = Math.floor(t1 * sampleRate);
+    // Map timeline seconds → sample index proportionally to the lane axis.
+    let s0 = Math.floor((t0 / axisDur) * len);
+    let s1 = Math.floor((t1 / axisDur) * len);
     if (s1 <= s0) s1 = s0 + 1;
     if (s0 >= len) {
       peaks[i] = 0;
@@ -154,7 +164,7 @@ export function drawWaveform(
   const endSec = Math.min(1, Math.max(opts.viewStartFrac, opts.viewEndFrac)) * dur;
   // ~1 bucket per device pixel keeps transients sharp when zoomed.
   const buckets = Math.max(1, Math.ceil(w * dpr));
-  const peaks = peaksForTimeSpan(wave, startSec, endSec, buckets);
+  const peaks = peaksForTimeSpan(wave, startSec, endSec, buckets, dur);
 
   g.fillStyle = opts.color;
   const mid = h / 2;

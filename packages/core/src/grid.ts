@@ -90,12 +90,15 @@ export function absoluteToMusical(
   const [beatsPerBar] = settings.timeSignature;
   const safeBpb = beatsPerBar > 0 ? beatsPerBar : 4;
   const relative = Math.max(0, tAbs - (settings.downbeatOffsetSec || 0));
-  const totalBeats = relative / beatSec;
-  const barIndex = Math.floor(totalBeats / safeBpb);
+  // Quantize to 1/16-beat grid so exact beat boundaries never format as *.*.3
+  // (e.g. beat 2.4 must not become 2.3.3 from float error).
+  const sixteenths = Math.round((relative / beatSec) * 4 - 1e-9);
+  const totalBeats = Math.max(0, sixteenths) / 4;
+  const barIndex = Math.floor(totalBeats / safeBpb + 1e-9);
   const beatInBar = totalBeats - barIndex * safeBpb;
-  const beat = Math.floor(beatInBar);
+  const beat = Math.floor(beatInBar + 1e-9);
   const frac = beatInBar - beat;
-  const sub = Math.min(3, Math.floor(frac * 4));
+  const sub = Math.min(3, Math.max(0, Math.round(frac * 4 - 1e-9)));
   return {
     bar: barIndex + 1,
     beat: beat + 1,
@@ -195,8 +198,9 @@ export function musicalRulerMarkTimes(
     if (t < -1e-9 || t > durationSec + 1e-9) continue;
     marks.push(Math.max(0, Math.min(durationSec, t)));
   }
-  if (marks.length === 0 || marks[0]! > 0) marks.unshift(0);
-  if (marks[marks.length - 1]! < durationSec - 1e-6) marks.push(durationSec);
+  // Only on-grid marks (Cubase-style): do not append bare durationSec — that
+  // lands between beats and draws a label with no matching snap line.
+  if (marks.length === 0 || marks[0]! > 1e-9) marks.unshift(0);
   return marks;
 }
 
