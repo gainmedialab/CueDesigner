@@ -1060,11 +1060,15 @@ export function App() {
           <input
             type="checkbox"
             checked={project.settings.metronomeEnabled}
-            onChange={(e) =>
+            onChange={(e) => {
+              const on = e.target.checked;
+              // Apply + sync audition under this gesture (HTMLAudio click path).
+              metronomeRef.current?.setEnabled(on);
+              if (on) metronomeRef.current?.auditionSync();
               setProject((p) =>
-                updateSettings(p, { metronomeEnabled: e.target.checked }),
-              )
-            }
+                updateSettings(p, { metronomeEnabled: on }),
+              );
+            }}
             title="Click on the BPM beat grid while playing (accent on downbeat)"
           />
           Click
@@ -1081,13 +1085,13 @@ export function App() {
             disabled={!project.settings.metronomeEnabled}
             title="Metronome click volume"
             aria-label="Metronome volume"
-            onChange={(e) =>
+            onChange={(e) => {
+              const vol = Number(e.target.value);
+              metronomeRef.current?.setVolume(vol);
               setProject((p) =>
-                updateSettings(p, {
-                  metronomeVolume: Number(e.target.value),
-                }),
-              )
-            }
+                updateSettings(p, { metronomeVolume: vol }),
+              );
+            }}
           />
         </label>
         <div className="grid-field zoom-field" aria-label="Timeline zoom">
