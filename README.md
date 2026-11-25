@@ -73,16 +73,17 @@ Use the **BPM bar** under transport:
 |---------|----------------|
 | **BPM** | Project tempo (quarter-note metronome) |
 | **Time sig** | Beats per bar / beat unit (e.g. 4/4) |
-| **Downbeat** | Offset of bar 1 beat 1 from file start (seconds) |
+| **Downbeat** | Offset of bar 1 beat 1 from file start (seconds); shared by snap, grid, musical time, and click |
 | **Snap** | Grid resolution: Bar, Beat, 1/4, 1/8, 1/16, 1/32 |
 | **Magnetic snap** | When on, place/drag snaps to the grid |
+| **Click** | Metronome on the beat grid while playing (downbeat accent); **Vol** sets level |
 | **FPS** | Project frame rate for show TC: 23.976, 24, 25, 29.97 DF, 29.97 NDF, 30 |
 | **TC offset** | Show timecode at file start (`HH:MM:SS:FF` / `;FF` for DF) |
-| **Zoom** | Timeline horizontal zoom (`−` / slider / `+`); denser ruler labels when zoomed |
+| **Zoom** | Timeline horizontal zoom (`−` / slider / `+`); denser ruler + waveform peaks when zoomed |
 
-**Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`, `timelineZoom`, `fps`, `showTcOffsetSec`).
+**Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`, `timelineZoom`, `metronomeEnabled`, `metronomeVolume`, `fps`, `showTcOffsetSec`).
 
-**Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
+**Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). The waveform redraws for the visible span at device-pixel density, keyed to the same file-relative `tAbs` as the playhead, cues, and grid. Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 
 ## Time display modes (Phase 1)
 
@@ -125,6 +126,8 @@ Folder / sidecar packages (copy media next to JSON) are planned for a later phas
       "gridResolution": "1/4",
       "snapEnabled": true,
       "timelineZoom": 1,
+      "metronomeEnabled": false,
+      "metronomeVolume": 0.5,
       "fps": "25",
       "showTcOffsetSec": 0
     },

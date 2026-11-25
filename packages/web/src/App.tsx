@@ -50,7 +50,13 @@ import {
   type ChangeEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { buildPeaks, drawPeaks, loadAudioFile } from "./audio";
+import {
+  Metronome,
+  drawWaveform,
+  loadAudioFile,
+  loadWaveformData,
+  type WaveformData,
+} from "./audio";
 import {
   MEDIA_EMBED_MAX_BYTES,
   blobToDataUrl,
@@ -83,7 +89,7 @@ export function App() {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
-  const [peaks, setPeaks] = useState<Float32Array | null>(null);
+  const [waveform, setWaveform] = useState<WaveformData | null>(null);
   const [status, setStatus] = useState("New project — import audio to begin.");
   const [newDeptName, setNewDeptName] = useState("");
   const [newDeptColor, setNewDeptColor] = useState("#5b8def");
@@ -93,6 +99,8 @@ export function App() {
     null,
   );
   const [tcOffsetDraft, setTcOffsetDraft] = useState<string | null>(null);
+  /** Scrollport scrollLeft — drives viewport waveform redraw. */
+  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
@@ -101,6 +109,7 @@ export function App() {
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
+  const metronomeRef = useRef<Metronome | null>(null);
   /** After zoom, restore scroll so this time stays under cursorX in the scrollport. */
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
@@ -126,19 +135,47 @@ export function App() {
     setTcOffsetDraft(null);
   }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
-  // Audio element lifecycle
+  // Audio element + metronome lifecycle
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "auto";
     audioRef.current = audio;
+    const metronome = new Metronome();
+    metronomeRef.current = metronome;
+    metronome.setMediaTimeGetter(() => audioRef.current?.currentTime ?? 0);
     const onEnded = () => setPlaying(false);
     audio.addEventListener("ended", onEnded);
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
       audioRef.current = null;
+      metronome.dispose();
+      metronomeRef.current = null;
     };
   }, []);
+
+  // Keep metronome grid / enable / volume in sync with project settings
+  useEffect(() => {
+    const m = metronomeRef.current;
+    if (!m) return;
+    m.setGrid({
+      bpm: project.settings.bpm,
+      timeSignature: project.settings.timeSignature,
+      downbeatOffsetSec: project.settings.downbeatOffsetSec,
+    });
+    m.setEnabled(project.settings.metronomeEnabled);
+    m.setVolume(project.settings.metronomeVolume);
+  }, [
+    project.settings.bpm,
+    project.settings.timeSignature,
+    project.settings.downbeatOffsetSec,
+    project.settings.metronomeEnabled,
+    project.settings.metronomeVolume,
+  ]);
+
+  useEffect(() => {
+    metronomeRef.current?.setPlaying(playing);
+  }, [playing]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -169,29 +206,64 @@ export function App() {
     };
   }, [playing]);
 
-  // Measure timeline scrollport for denser ruler marks
+  // Measure timeline scrollport for denser ruler marks + track scroll for waveform
   useEffect(() => {
     const el = timelineScrollRef.current;
     if (!el) return;
-    const measure = () => setScrollPortW(el.clientWidth);
+    const measure = () => {
+      setScrollPortW(el.clientWidth);
+      setTimelineScrollLeft(el.scrollLeft);
+    };
     measure();
+    const onScroll = () => setTimelineScrollLeft(el.scrollLeft);
+    el.addEventListener("scroll", onScroll, { passive: true });
     const ro = new ResizeObserver(measure);
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+    };
   }, []);
-
-  // Draw waveform on first track lane width
-  useEffect(() => {
-    const canvas = waveCanvasRef.current;
-    if (!canvas || !peaks) return;
-    drawPeaks(canvas, peaks, "#6b8caf");
-    const onResize = () => drawPeaks(canvas, peaks, "#6b8caf");
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [peaks, project.departments.length, project.settings.timelineZoom]);
 
   const duration = project.media?.durationSec ?? 0;
   const zoom = clampTimelineZoom(project.settings.timelineZoom);
+
+  // Viewport waveform: peaks keyed to the same tAbs % as cues/grid/playhead.
+  // Canvas covers only the visible lane slice so zoom keeps ~1 peak per device pixel.
+  useEffect(() => {
+    const canvas = waveCanvasRef.current;
+    const scrollEl = timelineScrollRef.current;
+    if (!canvas || !waveform || !scrollEl || !(duration > 0)) return;
+
+    const laneW = Math.max(1, scrollEl.scrollWidth - TRACK_LABEL_W);
+    // Lane scrolls under the sticky 100px label; only the uncovered slice is visible.
+    const viewStartPx = Math.max(0, Math.min(laneW, timelineScrollLeft));
+    const viewEndPx = Math.max(
+      viewStartPx,
+      Math.min(
+        laneW,
+        timelineScrollLeft + scrollEl.clientWidth - TRACK_LABEL_W,
+      ),
+    );
+    const viewW = Math.max(1, viewEndPx - viewStartPx);
+    canvas.style.left = `${viewStartPx}px`;
+    canvas.style.width = `${viewW}px`;
+    canvas.style.right = "auto";
+
+    drawWaveform(canvas, waveform, {
+      timelineDurationSec: duration,
+      viewStartFrac: viewStartPx / laneW,
+      viewEndFrac: viewEndPx / laneW,
+      color: "#6b8caf",
+    });
+  }, [
+    waveform,
+    duration,
+    zoom,
+    timelineScrollLeft,
+    scrollPortW,
+    project.departments.length,
+  ]);
 
   // Keep zoom-to-cursor / zoom-around-playhead scroll anchor after layout
   useLayoutEffect(() => {
@@ -286,7 +358,7 @@ export function App() {
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
     setMediaUrl(null);
-    setPeaks(null);
+    setWaveform(null);
     mediaBlobRef.current = null;
     mediaMetaRef.current = null;
   }, [mediaUrl]);
@@ -303,7 +375,7 @@ export function App() {
       mediaBlobRef.current = blob;
       mediaMetaRef.current = meta;
       setMediaUrl(objectUrl);
-      setPeaks(null);
+      setWaveform(null);
       if (opts?.persist !== false) {
         try {
           await putProjectMedia(projectId, blob, meta);
@@ -311,8 +383,8 @@ export function App() {
           // IndexedDB optional — in-memory + embed still work this session
         }
       }
-      buildPeaks(objectUrl)
-        .then(setPeaks)
+      loadWaveformData(objectUrl)
+        .then(setWaveform)
         .catch(() => undefined);
       return objectUrl;
     },
@@ -885,6 +957,40 @@ export function App() {
           />
           Magnetic snap
         </label>
+        <label className="grid-field checkbox">
+          <input
+            type="checkbox"
+            checked={project.settings.metronomeEnabled}
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, { metronomeEnabled: e.target.checked }),
+              )
+            }
+            title="Click on the BPM beat grid while playing (accent on downbeat)"
+          />
+          Click
+        </label>
+        <label className="grid-field click-vol-field">
+          Vol
+          <input
+            className="click-vol-slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={project.settings.metronomeVolume}
+            disabled={!project.settings.metronomeEnabled}
+            title="Metronome click volume"
+            aria-label="Metronome volume"
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, {
+                  metronomeVolume: Number(e.target.value),
+                }),
+              )
+            }
+          />
+        </label>
         <div className="grid-field zoom-field" aria-label="Timeline zoom">
           <span>Zoom</span>
           <button
@@ -1077,7 +1183,7 @@ export function App() {
                       className="track-lane"
                       onPointerDown={(e) => onLanePointer(e, d.id)}
                     >
-                      {idx === 0 && peaks && (
+                      {idx === 0 && waveform && (
                         <canvas ref={waveCanvasRef} className="waveform" />
                       )}
                       {gridLines.map((line, lineIdx) => (

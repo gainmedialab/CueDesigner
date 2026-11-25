@@ -501,11 +501,22 @@ input[type="color"] {
 
 .waveform {
   position: absolute;
-  inset: 0;
-  width: 100%;
+  top: 0;
+  bottom: 0;
+  left: 0;
   height: 100%;
   opacity: 0.35;
   pointer-events: none;
+  z-index: 1;
+}
+
+.click-vol-field {
+  gap: 0.35rem;
+}
+
+.click-vol-slider {
+  width: 5rem;
+  accent-color: var(--accent);
 }
 
 .cue-marker {

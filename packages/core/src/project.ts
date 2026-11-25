@@ -12,6 +12,12 @@ export function clampTimelineZoom(zoom: number): number {
   return Math.min(64, zoom);
 }
 
+/** Clamp metronome volume to 0..1. */
+export function clampMetronomeVolume(volume: number): number {
+  if (!Number.isFinite(volume)) return 0.5;
+  return Math.max(0, Math.min(1, volume));
+}
+
 export function defaultSettings(): ProjectSettings {
   return {
     bpm: 120,
@@ -20,6 +26,8 @@ export function defaultSettings(): ProjectSettings {
     gridResolution: "1/4",
     snapEnabled: true,
     timelineZoom: 1,
+    metronomeEnabled: false,
+    metronomeVolume: 0.5,
     fps: "25",
     showTcOffsetSec: 0,
   };
@@ -29,9 +37,19 @@ export function updateSettings(
   project: Project,
   patch: Partial<ProjectSettings>,
 ): Project {
+  const next = { ...project.settings, ...patch };
+  if (patch.timelineZoom != null) {
+    next.timelineZoom = clampTimelineZoom(patch.timelineZoom);
+  }
+  if (patch.metronomeVolume != null) {
+    next.metronomeVolume = clampMetronomeVolume(patch.metronomeVolume);
+  }
+  if (patch.downbeatOffsetSec != null && Number.isFinite(patch.downbeatOffsetSec)) {
+    next.downbeatOffsetSec = Math.max(0, patch.downbeatOffsetSec);
+  }
   return touchProject({
     ...project,
-    settings: { ...project.settings, ...patch },
+    settings: next,
   });
 }
 

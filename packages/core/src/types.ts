@@ -81,6 +81,10 @@ export interface ProjectSettings {
    * Persisted optionally in the project file; also kept in session state.
    */
   timelineZoom: number;
+  /** Audible metronome click locked to the BPM / downbeat grid */
+  metronomeEnabled: boolean;
+  /** Metronome level 0..1 */
+  metronomeVolume: number;
   fps: FrameRateLabel;
   /** Show timecode offset from file-relative zero */
   showTcOffsetSec: number;

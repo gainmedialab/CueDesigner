@@ -1,4 +1,8 @@
-import { clampTimelineZoom, defaultSettings } from "./project.js";
+import {
+  clampMetronomeVolume,
+  clampTimelineZoom,
+  defaultSettings,
+} from "./project.js";
 import { isFrameRateLabel } from "./time.js";
 import {
   PROJECT_SCHEMA_VERSION,
@@ -56,6 +60,14 @@ function normalizeSettings(raw: unknown): ProjectSettings {
     typeof s.timelineZoom === "number" && Number.isFinite(s.timelineZoom)
       ? clampTimelineZoom(s.timelineZoom)
       : defaults.timelineZoom;
+  const metronomeEnabled =
+    typeof s.metronomeEnabled === "boolean"
+      ? s.metronomeEnabled
+      : defaults.metronomeEnabled;
+  const metronomeVolume =
+    typeof s.metronomeVolume === "number" && Number.isFinite(s.metronomeVolume)
+      ? clampMetronomeVolume(s.metronomeVolume)
+      : defaults.metronomeVolume;
   const fps =
     typeof s.fps === "string" && isFrameRateLabel(s.fps) ? s.fps : defaults.fps;
   const showTcOffsetSec =
@@ -69,6 +81,8 @@ function normalizeSettings(raw: unknown): ProjectSettings {
     gridResolution,
     snapEnabled,
     timelineZoom,
+    metronomeEnabled,
+    metronomeVolume,
     fps,
     showTcOffsetSec,
   };
