@@ -548,8 +548,8 @@ export function App() {
         setProject((p) => {
           const next = !p.settings.metronomeEnabled;
           metronomeRef.current?.setEnabled(next);
-          // Immediate audible proof on the same key gesture when enabling mid-play.
-          if (next && playingRef.current) {
+          // Audible proof on the same key gesture (HTMLAudioElement click path).
+          if (next) {
             void metronomeRef.current?.audition();
           }
           return updateSettings(p, { metronomeEnabled: next });
@@ -1209,7 +1209,7 @@ export function App() {
               const on = e.target.checked;
               // Apply immediately so Play in the same turn already sees Click on.
               metronomeRef.current?.setEnabled(on);
-              if (on && playingRef.current) {
+              if (on) {
                 void metronomeRef.current?.audition();
               }
               setProject((p) =>
