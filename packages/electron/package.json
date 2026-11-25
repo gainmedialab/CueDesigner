@@ -1,0 +1,20 @@
+{
+  "name": "@cuedesigner/electron",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "npm run build && electron .",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@cuedesigner/web": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "electron": "^34.0.1",
+    "typescript": "^5.7.3"
+  }
+}
