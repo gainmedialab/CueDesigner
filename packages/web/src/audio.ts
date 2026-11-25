@@ -224,6 +224,8 @@ export interface MetronomeGrid {
  * - Single-flight `resume()`; scheduler start uses an epoch so overlapping play
  *   presses cannot leave two intervals or double-schedule clicks.
  * - Media runs through a GainNode so pause can mute graph tails immediately.
+ * - Re-anchor (`lockToMediaClock`) after every play()/seek once media is running;
+ *   never capture the media↔ctx anchor while currentTime is still frozen.
  * - Do not re-anchor on small `currentTime` quanta (~50–250ms steps).
  */
 export class Metronome {
@@ -304,8 +306,20 @@ export class Metronome {
   }
 
   /**
+   * Unmute the media GainNode without starting the click scheduler.
+   * Call before `audio.play()` so the element never starts into a muted graph.
+   */
+  primeMediaOutput(): void {
+    this.setMediaAudible(true);
+  }
+
+  /**
    * Transport play/pause. Idempotent: repeated `true` while already playing does
    * not restart the scheduler (avoids double intervals from React effect + sync call).
+   *
+   * Prefer: `primeMediaOutput()` → `await audio.play()` → `setPlaying(true)` →
+   * `lockToMediaClock()` so the media↔ctx anchor is taken after media is running
+   * (pause→play otherwise schedules clicks against a frozen currentTime).
    */
   setPlaying(playing: boolean): void {
     if (this.playing === playing) {
@@ -343,13 +357,23 @@ export class Metronome {
     return this.resumeInflight;
   }
 
-  /** Call after seeks so clicks re-lock without tearing down the scheduler. */
-  resync(): void {
+  /**
+   * Hard re-anchor to the live media clock: drop every pending click, then map
+   * media tAbs ↔ AudioContext.currentTime from the current `currentTime`.
+   * Call after seeks and after every resume-from-pause once `audio.play()` has
+   * resolved (and again on the element `playing` event as MediaElementSource settles).
+   */
+  lockToMediaClock(): void {
     this.clearPending();
     this.scheduledBeats.clear();
     if (!this.ctx) return;
     this.captureAnchor();
     this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
+  }
+
+  /** @deprecated Prefer `lockToMediaClock` — same behavior. */
+  resync(): void {
+    this.lockToMediaClock();
   }
 
   dispose(): void {
@@ -462,9 +486,9 @@ export class Metronome {
     void this.resume().then(() => {
       if (epoch !== this.schedulerEpoch) return;
       if (!this.playing || !this.enabled) return;
-      this.scheduledBeats.clear();
-      this.captureAnchor();
-      this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
+      // Anchor from live media time — caller should have already started playback
+      // (see lockToMediaClock). Re-capture here so a late start still locks.
+      this.lockToMediaClock();
       this.restoreClickGain();
       if (this.timer != null) {
         clearInterval(this.timer);

@@ -187,13 +187,17 @@ export function App() {
       metronomeRef.current?.setPlaying(false);
       setPlaying(false);
     };
-    const onSeeked = () => metronomeRef.current?.resync();
+    // Seek + play-settled: re-anchor media↔ctx and drop stale click schedules.
+    const onSeeked = () => metronomeRef.current?.lockToMediaClock();
+    const onPlaying = () => metronomeRef.current?.lockToMediaClock();
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("seeked", onSeeked);
+    audio.addEventListener("playing", onPlaying);
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("seeked", onSeeked);
+      audio.removeEventListener("playing", onPlaying);
       audioRef.current = null;
       metronome.dispose();
       metronomeRef.current = null;
@@ -442,8 +446,8 @@ export function App() {
     const clamped = Math.max(0, Math.min(t, audio?.duration || duration || 0));
     if (audio) audio.currentTime = clamped;
     setCurrentTime(clamped);
-    // Immediate resync (seeked also fires); keeps click locked across scrub.
-    metronomeRef.current?.resync();
+    // Immediate re-anchor (seeked also fires); keeps click locked across scrub.
+    metronomeRef.current?.lockToMediaClock();
   }, [duration]);
 
   const togglePlay = useCallback(async () => {
@@ -466,15 +470,19 @@ export function App() {
       // Build/resume shared graph under this gesture *before* play.
       await metronomeRef.current?.resume();
       if (gen !== transportGenRef.current) return;
-      // Unmute media + arm click *before* element.play so audio never starts
-      // into a muted MediaElementSource (trail/glitch on rapid Play).
-      metronomeRef.current?.setPlaying(true);
+      // Unmute media path first; do NOT arm the click scheduler yet — anchoring
+      // while currentTime is still frozen (pre-play) makes clicks lead audio
+      // after every Pause→Play.
+      metronomeRef.current?.primeMediaOutput();
       await audio.play();
       if (gen !== transportGenRef.current) {
         audio.pause();
         metronomeRef.current?.setPlaying(false);
         return;
       }
+      // Media is running: start scheduler and hard-lock media↔ctx (clears stale).
+      metronomeRef.current?.setPlaying(true);
+      metronomeRef.current?.lockToMediaClock();
       // React effect is idempotent (already playing on metronome).
       setPlaying(true);
     } catch (err) {
