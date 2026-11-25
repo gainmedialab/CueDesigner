@@ -469,8 +469,8 @@ export function App() {
     wantPlayingRef.current = true;
     const gen = ++transportGenRef.current;
     try {
-      // Under this Play gesture: resume shared AudioContext + wire MES (once)
-      // so track and click share the same output device, then start media.
+      // Resume click AudioContext under this gesture (media stays native —
+      // never create MediaElementSource; that muted the element before).
       await metronomeRef.current?.resume();
       if (gen !== transportGenRef.current) {
         wantPlayingRef.current = false;
@@ -487,6 +487,10 @@ export function App() {
       setCurrentTime(audio.currentTime);
       metronomeRef.current?.setPlaying(true);
       setPlaying(true);
+      // Immediate click under the same Play gesture when Click is already on.
+      if (metronomeRef.current?.isEnabled()) {
+        void metronomeRef.current.audition();
+      }
     } catch (err) {
       if (gen !== transportGenRef.current) return;
       wantPlayingRef.current = false;
