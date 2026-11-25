@@ -166,7 +166,9 @@ export function App() {
     setTcOffsetDraft(null);
   }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
-  // Audio element + metronome lifecycle (shared AudioContext via MediaElementSource)
+  // Audio element + metronome lifecycle. MediaElementSource is wired lazily on
+  // first play (user gesture) so we never leave a suspended AudioContext
+  // hooked to the element at mount — that caused mute/glitch on resume.
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "auto";
@@ -445,7 +447,8 @@ export function App() {
       // Clear scroll suspension; checkbox preference stays latched.
       setFollowSuspended(false);
       try {
-        // Resume shared AudioContext before play — MediaElementSource is mute while suspended.
+        // Build/resume shared AudioContext + MediaElementSource under this gesture
+        // *before* play so the element never starts on the default output path.
         await metronomeRef.current?.resume();
         await audio.play();
         setPlaying(true);
@@ -494,6 +497,16 @@ export function App() {
           if (next) setFollowSuspended(false);
           return next;
         });
+        return;
+      }
+      if (key === "c") {
+        if (e.repeat) return;
+        e.preventDefault();
+        setProject((p) =>
+          updateSettings(p, {
+            metronomeEnabled: !p.settings.metronomeEnabled,
+          }),
+        );
         return;
       }
       if (key === "g") {

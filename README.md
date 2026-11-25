@@ -91,6 +91,7 @@ Use the **BPM bar** under transport:
 |-----|--------|
 | **Space** | Play / pause |
 | **F** | Toggle **Follow** playhead |
+| **C** | Toggle **Click** (metronome) |
 | **G** | Zoom out (around playhead) |
 | **H** | Zoom in (around playhead) |
 
