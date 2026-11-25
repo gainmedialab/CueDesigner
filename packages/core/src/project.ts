@@ -18,6 +18,12 @@ export function clampMetronomeVolume(volume: number): number {
   return Math.max(0, Math.min(1, volume));
 }
 
+/** Whole-number BPM only (quarter-notes per minute), clamped to a practical range. */
+export function clampBpm(bpm: number): number {
+  if (!Number.isFinite(bpm)) return 120;
+  return Math.max(20, Math.min(400, Math.round(bpm)));
+}
+
 export function defaultSettings(): ProjectSettings {
   return {
     bpm: 120,
@@ -38,6 +44,9 @@ export function updateSettings(
   patch: Partial<ProjectSettings>,
 ): Project {
   const next = { ...project.settings, ...patch };
+  if (patch.bpm != null) {
+    next.bpm = clampBpm(patch.bpm);
+  }
   if (patch.timelineZoom != null) {
     next.timelineZoom = clampTimelineZoom(patch.timelineZoom);
   }

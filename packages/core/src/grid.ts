@@ -1,8 +1,9 @@
 import type { GridResolution, ProjectSettings } from "./types.js";
 
-/** Quarter-note duration in seconds from BPM (standard metronome BPM). */
+/** Quarter-note duration in seconds from whole BPM (standard metronome BPM). */
 export function quarterNoteSec(bpm: number): number {
-  const safe = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
+  const raw = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
+  const safe = Math.max(1, Math.round(raw));
   return 60 / safe;
 }
 

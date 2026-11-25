@@ -68,6 +68,7 @@ export type GridResolution =
   | "1/32";
 
 export interface ProjectSettings {
+  /** Tempo as whole BPM only (integer quarter-notes per minute). */
   bpm: number;
   timeSignature: [number, number];
   /** Downbeat offset in seconds from file start */

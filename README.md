@@ -71,7 +71,7 @@ Use the **BPM bar** under transport:
 
 | Control | What it does |
 |---------|----------------|
-| **BPM** | Project tempo (quarter-note metronome) |
+| **BPM** | Project tempo as whole BPM only (integer quarter-notes / minute) |
 | **Time sig** | Beats per bar / beat unit (e.g. 4/4) |
 | **Downbeat** | Offset of bar 1 beat 1 from file start (seconds); shared by snap, grid, musical time, and click |
 | **Snap** | Grid resolution: Bar, Beat, 1/4, 1/8, 1/16, 1/32 |

@@ -1,5 +1,6 @@
 import {
   addDepartment,
+  clampBpm,
   clampTimelineZoom,
   createCue,
   createId,
@@ -137,7 +138,7 @@ export function App() {
     setTcOffsetDraft(null);
   }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
-  // Audio element + metronome lifecycle
+  // Audio element + metronome lifecycle (shared AudioContext via MediaElementSource)
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "auto";
@@ -145,11 +146,15 @@ export function App() {
     const metronome = new Metronome();
     metronomeRef.current = metronome;
     metronome.setMediaTimeGetter(() => audioRef.current?.currentTime ?? 0);
+    metronome.attachMediaElement(audio);
     const onEnded = () => setPlaying(false);
+    const onSeeked = () => metronomeRef.current?.resync();
     audio.addEventListener("ended", onEnded);
+    audio.addEventListener("seeked", onSeeked);
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("seeked", onSeeked);
       audioRef.current = null;
       metronome.dispose();
       metronomeRef.current = null;
@@ -189,6 +194,25 @@ export function App() {
       audio.removeAttribute("src");
       audio.load();
     }
+  }, [mediaUrl]);
+
+  // Keep project duration locked to the HTMLMediaElement playback clock so
+  // playhead % / grid / heard audio share one timebase.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !mediaUrl) return;
+    const syncDuration = () => {
+      const d = audio.duration;
+      if (!Number.isFinite(d) || !(d > 0)) return;
+      setProject((p) => {
+        if (!p.media) return p;
+        if (Math.abs(p.media.durationSec - d) < 0.0005) return p;
+        return setProjectMedia(p, { ...p.media, durationSec: d });
+      });
+    };
+    audio.addEventListener("loadedmetadata", syncDuration);
+    if (audio.readyState >= 1) syncDuration();
+    return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
   // RAF clock while playing
@@ -338,6 +362,8 @@ export function App() {
     const clamped = Math.max(0, Math.min(t, audio?.duration || duration || 0));
     if (audio) audio.currentTime = clamped;
     setCurrentTime(clamped);
+    // Immediate resync (seeked also fires); keeps click locked across scrub.
+    metronomeRef.current?.resync();
   }, [duration]);
 
   const togglePlay = useCallback(async () => {
@@ -348,6 +374,8 @@ export function App() {
       setPlaying(false);
     } else {
       try {
+        // Resume shared AudioContext before play — MediaElementSource is mute while suspended.
+        await metronomeRef.current?.resume();
         await audio.play();
         setPlaying(true);
       } catch (err) {
@@ -826,11 +854,14 @@ export function App() {
             type="number"
             min={20}
             max={400}
-            step={0.1}
+            step={1}
+            inputMode="numeric"
             value={project.settings.bpm}
+            title="Whole BPM only (integer)"
             onChange={(e) => {
-              const bpm = Number(e.target.value);
-              if (!Number.isFinite(bpm) || bpm <= 0) return;
+              const raw = Number(e.target.value);
+              if (!Number.isFinite(raw) || raw <= 0) return;
+              const bpm = clampBpm(raw);
               setProject((p) => updateSettings(p, { bpm }));
             }}
           />

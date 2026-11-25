@@ -1,4 +1,5 @@
 import {
+  clampBpm,
   clampMetronomeVolume,
   clampTimelineZoom,
   defaultSettings,
@@ -34,7 +35,7 @@ function normalizeSettings(raw: unknown): ProjectSettings {
   const s = raw as Record<string, unknown>;
   const bpm =
     typeof s.bpm === "number" && Number.isFinite(s.bpm) && s.bpm > 0
-      ? s.bpm
+      ? clampBpm(s.bpm)
       : defaults.bpm;
   let timeSignature: [number, number] = defaults.timeSignature;
   if (Array.isArray(s.timeSignature) && s.timeSignature.length >= 2) {

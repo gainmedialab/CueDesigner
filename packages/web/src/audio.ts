@@ -77,39 +77,30 @@ export async function loadWaveformData(
 
 /**
  * Peak buckets for a file-relative time span [startSec, endSec).
- * Each bucket maps uniformly in **timeline seconds** (same tAbs as cues/grid/playhead).
- * Sample indices use the timeline duration basis so the waveform x-axis matches
- * `timeToLanePercent` even when HTMLMediaElement duration ≠ AudioBuffer duration.
+ * Sample indices use `t * sampleRate` so peaks match heard PCM / HTMLMediaElement
+ * playback time (same tAbs as playhead). Do not stretch by lane duration — that
+ * visually pins peaks to the grid while desyncing them from audio.
  */
 export function peaksForTimeSpan(
   wave: WaveformData,
   startSec: number,
   endSec: number,
   buckets: number,
-  timelineDurationSec?: number,
+  _timelineDurationSec?: number,
 ): Float32Array {
   const n = Math.max(1, Math.floor(buckets));
   const peaks = new Float32Array(n);
   const span = endSec - startSec;
   if (!(span > 0) || wave.channel.length === 0) return peaks;
 
-  const { channel, sampleRate, bufferDurationSec } = wave;
+  const { channel, sampleRate } = wave;
   const len = channel.length;
-  // Prefer explicit timeline duration; fall back to decoded buffer length.
-  const axisDur =
-    timelineDurationSec != null && timelineDurationSec > 0
-      ? timelineDurationSec
-      : bufferDurationSec > 0
-        ? bufferDurationSec
-        : len / sampleRate;
-  if (!(axisDur > 0)) return peaks;
 
   for (let i = 0; i < n; i++) {
     const t0 = startSec + (i / n) * span;
     const t1 = startSec + ((i + 1) / n) * span;
-    // Map timeline seconds → sample index proportionally to the lane axis.
-    let s0 = Math.floor((t0 / axisDur) * len);
-    let s1 = Math.floor((t1 / axisDur) * len);
+    let s0 = Math.floor(t0 * sampleRate);
+    let s1 = Math.floor(t1 * sampleRate);
     if (s1 <= s0) s1 = s0 + 1;
     if (s0 >= len) {
       peaks[i] = 0;
@@ -222,10 +213,18 @@ export interface MetronomeGrid {
 /**
  * Schedules short clicks on the musical beat grid while media plays.
  * Accent on bar downbeats. Times use the same origin as snap/grid (`downbeatOffsetSec`).
+ *
+ * Clock model: route the HTMLMediaElement through the same AudioContext as the
+ * click synth, and convert media tAbs → context time via a stable media/ctx
+ * anchor (refreshed on play/seek). Naive `ctx.now + (tAbs - mediaNow)` per tick
+ * drifts because HTMLMediaElement.currentTime is quantized relative to the
+ * AudioContext clock.
  */
 export class Metronome {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private mediaSource: MediaElementAudioSourceNode | null = null;
+  private mediaEl: HTMLMediaElement | null = null;
   private timer: number | null = null;
   private nextBeatIndex = 0;
   private enabled = false;
@@ -237,8 +236,16 @@ export class Metronome {
     downbeatOffsetSec: 0,
   };
   private getMediaTime: () => number = () => 0;
-  private readonly lookAheadSec = 0.12;
-  private readonly scheduleHorizonSec = 0.25;
+  /** Media time at last anchor capture. */
+  private anchorMedia = 0;
+  /** AudioContext.currentTime at last anchor capture. */
+  private anchorCtx = 0;
+  private anchored = false;
+  private pendingOsc: OscillatorNode[] = [];
+  private readonly lookAheadSec = 0.1;
+  private readonly scheduleHorizonSec = 0.3;
+  /** Re-anchor when reported media time drifts this far from the estimate. */
+  private readonly driftResyncSec = 0.035;
 
   setEnabled(on: boolean): void {
     this.enabled = on;
@@ -258,45 +265,112 @@ export class Metronome {
   }
 
   setGrid(grid: MetronomeGrid): void {
-    this.grid = grid;
+    this.grid = {
+      ...grid,
+      bpm: Number.isFinite(grid.bpm) && grid.bpm > 0 ? Math.round(grid.bpm) : 120,
+    };
     // Resync beat index from current media time on next tick
-    this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
+    this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
   }
 
   setMediaTimeGetter(fn: () => number): void {
     this.getMediaTime = fn;
   }
 
+  /**
+   * Route media through this metronome's AudioContext so track + click share
+   * one audio graph. Safe to call once per HTMLMediaElement lifetime.
+   */
+  attachMediaElement(audio: HTMLMediaElement): void {
+    this.mediaEl = audio;
+    const ctx = this.getOrCreateCtx();
+    if (!this.mediaSource) {
+      this.mediaSource = ctx.createMediaElementSource(audio);
+      this.mediaSource.connect(ctx.destination);
+    }
+  }
+
   /** Call when transport play/pause changes. */
   setPlaying(playing: boolean): void {
     this.playing = playing;
-    if (playing && this.enabled) this.startScheduler();
-    else this.stopScheduler();
+    if (playing) {
+      // MediaElementSource is silent while the context is suspended — always resume on play.
+      void this.ensureCtx();
+      if (this.enabled) this.startScheduler();
+    } else {
+      this.stopScheduler();
+    }
+  }
+
+  /** Resume the shared AudioContext (needed so MediaElementSource can output). */
+  async resume(): Promise<void> {
+    await this.ensureCtx();
+  }
+
+  /** Call after seeks (and when media currentTime jumps) so clicks re-lock. */
+  resync(): void {
+    this.clearPending();
+    this.captureAnchor();
+    this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
   }
 
   dispose(): void {
     this.stopScheduler();
+    this.clearPending();
+    try {
+      this.mediaSource?.disconnect();
+    } catch {
+      // already disconnected
+    }
+    this.mediaSource = null;
+    this.mediaEl = null;
     const ctx = this.ctx;
     this.ctx = null;
     this.master = null;
+    this.anchored = false;
     if (ctx) void ctx.close();
   }
 
-  private async ensureCtx(): Promise<AudioContext> {
+  private getOrCreateCtx(): AudioContext {
     if (!this.ctx) {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
       this.master.gain.value = this.volume;
       this.master.connect(this.ctx.destination);
     }
-    if (this.ctx.state === "suspended") {
-      await this.ctx.resume();
-    }
     return this.ctx;
   }
 
+  private async ensureCtx(): Promise<AudioContext> {
+    const ctx = this.getOrCreateCtx();
+    if (ctx.state === "suspended") {
+      await ctx.resume();
+    }
+    return ctx;
+  }
+
+  private captureAnchor(): void {
+    if (!this.ctx) return;
+    this.anchorMedia = this.getMediaTime();
+    this.anchorCtx = this.ctx.currentTime;
+    this.anchored = true;
+  }
+
+  /** Smooth media-time estimate from the AudioContext clock. */
+  private estimatedMediaTime(): number {
+    if (!this.ctx || !this.anchored) return this.getMediaTime();
+    return this.anchorMedia + (this.ctx.currentTime - this.anchorCtx);
+  }
+
+  /** Map a media (file-relative) time onto AudioContext.currentTime. */
+  private mediaToCtx(tMedia: number): number {
+    if (!this.ctx || !this.anchored) return this.ctx?.currentTime ?? 0;
+    return this.anchorCtx + (tMedia - this.anchorMedia);
+  }
+
   private beatDurationSec(): number {
-    const bpm = this.grid.bpm > 0 ? this.grid.bpm : 120;
+    const bpmRaw = this.grid.bpm > 0 ? this.grid.bpm : 120;
+    const bpm = Math.round(bpmRaw);
     const den = this.grid.timeSignature[1] > 0 ? this.grid.timeSignature[1] : 4;
     // Same as core beatDurationSec: quarter-note BPM × (4/denominator).
     return (60 / bpm) * (4 / den);
@@ -318,7 +392,12 @@ export class Metronome {
     this.stopScheduler();
     void this.ensureCtx().then(() => {
       if (!this.playing || !this.enabled) return;
-      this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
+      // MediaElementSource may not exist yet if attach raced; try again.
+      if (this.mediaEl && !this.mediaSource) {
+        this.attachMediaElement(this.mediaEl);
+      }
+      this.captureAnchor();
+      this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
       this.timer = window.setInterval(() => this.tick(), 25);
       this.tick();
     });
@@ -329,6 +408,24 @@ export class Metronome {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.clearPending();
+    this.anchored = false;
+  }
+
+  private clearPending(): void {
+    for (const osc of this.pendingOsc) {
+      try {
+        osc.stop();
+      } catch {
+        // already stopped
+      }
+      try {
+        osc.disconnect();
+      } catch {
+        // already disconnected
+      }
+    }
+    this.pendingOsc = [];
   }
 
   private tick(): void {
@@ -338,27 +435,38 @@ export class Metronome {
 
     const beatSec = this.beatDurationSec();
     if (!(beatSec > 0)) return;
+
+    // Soft-correct anchor when HTMLMediaElement.currentTime jumps (seek / stall).
+    const reported = this.getMediaTime();
+    if (this.anchored) {
+      const est = this.estimatedMediaTime();
+      if (Math.abs(reported - est) > this.driftResyncSec) {
+        this.clearPending();
+        this.captureAnchor();
+        this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
+      }
+    } else {
+      this.captureAnchor();
+      this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
+    }
+
     const origin = this.grid.downbeatOffsetSec || 0;
     const bpb = this.beatsPerBar();
-    const mediaNow = this.getMediaTime();
-    // Resync after seeks / large jumps so we don't skip or replay a burst.
+    const mediaNow = this.estimatedMediaTime();
     const want = this.beatIndexAt(mediaNow);
-    if (
-      this.nextBeatIndex < want - 1 ||
-      this.nextBeatIndex > want + 4
-    ) {
+    if (this.nextBeatIndex < want - 1 || this.nextBeatIndex > want + 4) {
       this.nextBeatIndex = want;
     }
     const until = mediaNow + this.scheduleHorizonSec;
+    const ctxHorizon =
+      ctx.currentTime + this.lookAheadSec + this.scheduleHorizonSec;
 
     while (true) {
       const tAbs = origin + this.nextBeatIndex * beatSec;
       if (tAbs > until) break;
-      if (tAbs >= 0 && tAbs >= mediaNow - 0.001) {
-        const delay = tAbs - mediaNow;
-        // Map media-relative delay onto AudioContext clock.
-        const when = ctx.currentTime + Math.max(0, delay);
-        if (when <= ctx.currentTime + this.lookAheadSec + this.scheduleHorizonSec) {
+      if (tAbs >= 0 && tAbs >= mediaNow - 0.002) {
+        const when = this.mediaToCtx(tAbs);
+        if (when <= ctxHorizon) {
           const beatInBar = ((this.nextBeatIndex % bpb) + bpb) % bpb;
           this.scheduleClick(when, beatInBar === 0);
         }
@@ -373,6 +481,9 @@ export class Metronome {
     const master = this.master;
     if (!ctx || !master) return;
 
+    // Skip clicks that would fire in the past (avoid late "catch-up" blips).
+    if (when < ctx.currentTime - 0.002) return;
+
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = "square";
@@ -384,11 +495,18 @@ export class Metronome {
     gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.045);
     osc.connect(gain);
     gain.connect(master);
+    this.pendingOsc.push(osc);
     osc.start(t0);
     osc.stop(t0 + 0.05);
     osc.onended = () => {
-      osc.disconnect();
-      gain.disconnect();
+      const i = this.pendingOsc.indexOf(osc);
+      if (i >= 0) this.pendingOsc.splice(i, 1);
+      try {
+        osc.disconnect();
+        gain.disconnect();
+      } catch {
+        // already disconnected
+      }
     };
   }
 }
