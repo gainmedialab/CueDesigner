@@ -79,7 +79,7 @@ export async function loadWaveformData(
  * Peak buckets for a file-relative time span [startSec, endSec).
  * Sample indices use `t * sampleRate` so peaks match heard PCM / HTMLMediaElement
  * playback time (same tAbs as playhead). Do not stretch by lane duration — that
- * visually pins peaks to the grid while desyncing them from audio.
+ * visually pins peaks to the grid while desyncing them from heard audio.
  */
 export function peaksForTimeSpan(
   wave: WaveformData,
@@ -153,7 +153,6 @@ export function drawWaveform(
 
   const startSec = Math.max(0, opts.viewStartFrac) * dur;
   const endSec = Math.min(1, Math.max(opts.viewStartFrac, opts.viewEndFrac)) * dur;
-  // ~1 bucket per device pixel keeps transients sharp when zoomed.
   const buckets = Math.max(1, Math.ceil(w * dpr));
   const peaks = peaksForTimeSpan(wave, startSec, endSec, buckets, dur);
 
@@ -212,27 +211,32 @@ export interface MetronomeGrid {
 
 /**
  * Schedules short clicks on the musical beat grid while media plays.
- * Accent on bar downbeats. Times use the same origin as snap/grid (`downbeatOffsetSec`).
  *
- * Media: native HTMLMediaElement output (no MediaElementSource).
- * Clicks: dedicated AudioContext → master GainNode → destination, using
- * AudioBufferSourceNode bursts (more reliable than osc + exponential ramps).
+ * Shared-output model (fixes “media audible, click silent”):
+ * - One AudioContext for both track and click.
+ * - HTMLMediaElement → MediaElementSource → destination (media gain always 1;
+ *   never mute this path — pause with element.pause() only).
+ * - Click buffers → clickGain → same destination.
+ * That keeps clicks on the same audio device/route as the track.
  *
- * Scheduling: look-ahead from live `currentTime`, each beat index once.
- * `lockToMediaClock()` on seek clears pending clicks and resets the cursor.
+ * Call `resume()` from the Play user gesture *before* `audio.play()`.
  */
 export class Metronome {
   private ctx: AudioContext | null = null;
-  private master: GainNode | null = null;
+  private clickGain: GainNode | null = null;
+  private mediaGain: GainNode | null = null;
+  private mediaSource: MediaElementAudioSourceNode | null = null;
+  private mediaEl: HTMLMediaElement | null = null;
   private clickBufHigh: AudioBuffer | null = null;
   private clickBufLow: AudioBuffer | null = null;
   private timer: number | null = null;
-  /** Bumps on every stop/start so stale async starts bail out. */
   private schedulerEpoch = 0;
+  /** True while startScheduler's async begin is in flight. */
+  private startInflight = false;
   private resumeInflight: Promise<void> | null = null;
   private nextBeatIndex = 0;
   private enabled = false;
-  private volume = 0.5;
+  private volume = 0.7;
   private playing = false;
   private grid: MetronomeGrid = {
     bpm: 120,
@@ -242,28 +246,26 @@ export class Metronome {
   private getMediaTime: () => number = () => 0;
   private pendingSources: AudioBufferSourceNode[] = [];
   private scheduledBeats = new Set<number>();
-  private readonly scheduleHorizonSec = 0.35;
-  /** How many clicks have been successfully started (diagnostics / tests). */
+  private readonly scheduleHorizonSec = 0.4;
+  /** Diagnostics: successful src.start() count. */
   clicksStarted = 0;
 
   setEnabled(on: boolean): void {
     const was = this.enabled;
     this.enabled = on;
+    this.applyClickGain();
     if (!on) {
       this.stopScheduler();
-      this.applyMasterGain();
       return;
     }
-    this.applyMasterGain();
-    // Only (re)start on enable edges or if the timer was lost while playing.
-    if (this.playing && (!was || this.timer == null)) {
+    if (this.playing && (!was || (this.timer == null && !this.startInflight))) {
       this.startScheduler();
     }
   }
 
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(1, v));
-    this.applyMasterGain();
+    this.applyClickGain();
   }
 
   setGrid(grid: MetronomeGrid): void {
@@ -278,69 +280,114 @@ export class Metronome {
     this.getMediaTime = fn;
   }
 
-  /** Call-site compatibility — track audio stays on the element. */
-  attachMediaElement(_audio: HTMLMediaElement): void {
-    // no-op
+  /** Remember the media element; MES is wired once on first resume(). */
+  attachMediaElement(audio: HTMLMediaElement): void {
+    this.mediaEl = audio;
   }
 
   /**
-   * Transport play/pause. Call after `audio.play()` resolves.
-   * Idempotent when already in the requested state.
+   * Transport play/pause. Call after `await resume()` and preferably after
+   * `audio.play()` so currentTime is live.
    */
   setPlaying(playing: boolean): void {
     if (this.playing === playing) {
-      if (playing && this.enabled && this.timer == null) {
+      if (
+        playing &&
+        this.enabled &&
+        this.timer == null &&
+        !this.startInflight
+      ) {
         this.startScheduler();
       }
       return;
     }
     this.playing = playing;
     if (playing) {
-      this.applyMasterGain();
+      this.applyClickGain();
       if (this.enabled) this.startScheduler();
     } else {
       this.stopScheduler();
     }
   }
 
-  /** Create/resume the click AudioContext under a user gesture. */
+  /**
+   * Under a user gesture: create shared AudioContext, wire MediaElementSource
+   * (once), resume context, build click buffers. Must run before audio.play().
+   */
   async resume(): Promise<void> {
     if (this.resumeInflight) return this.resumeInflight;
     this.resumeInflight = (async () => {
       const ctx = this.getOrCreateCtx();
+      this.ensureMediaRouted(ctx);
       this.ensureClickBuffers(ctx);
       if (ctx.state !== "running") {
         await ctx.resume();
       }
-      this.applyMasterGain();
+      // Media path stays at unity — never mute (that caused the silence regression).
+      if (this.mediaGain) {
+        this.mediaGain.gain.setValueAtTime(1, ctx.currentTime);
+      }
+      this.applyClickGain();
     })().finally(() => {
       this.resumeInflight = null;
     });
     return this.resumeInflight;
   }
 
-  /** Drop pending clicks and reset the beat cursor from live media time. */
+  /** Clear pending clicks and reset beat cursor from live media time. */
   lockToMediaClock(): void {
     this.clearPending();
     this.scheduledBeats.clear();
     this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
   }
 
-  /** @deprecated Prefer `lockToMediaClock`. */
+  /** @deprecated Prefer lockToMediaClock. */
   resync(): void {
     this.lockToMediaClock();
+  }
+
+  /**
+   * Fire one immediate click (same buffer path). Useful after Play to prove
+   * the output path under the same gesture; also used when enabling Click
+   * while already playing.
+   */
+  async audition(): Promise<void> {
+    await this.resume();
+    if (!this.ctx || !this.clickGain || !this.clickBufHigh) return;
+    if (this.ctx.state !== "running") await this.ctx.resume();
+    this.applyClickGain();
+    this.fireBuffer(this.clickBufHigh, this.ctx.currentTime + 0.02, 1);
   }
 
   dispose(): void {
     this.stopScheduler();
     this.clearPending();
     this.scheduledBeats.clear();
-    const ctx = this.ctx;
-    this.ctx = null;
-    this.master = null;
+    try {
+      this.mediaSource?.disconnect();
+    } catch {
+      // already disconnected
+    }
+    try {
+      this.mediaGain?.disconnect();
+    } catch {
+      // already disconnected
+    }
+    try {
+      this.clickGain?.disconnect();
+    } catch {
+      // already disconnected
+    }
+    this.mediaSource = null;
+    this.mediaGain = null;
+    this.clickGain = null;
+    this.mediaEl = null;
     this.clickBufHigh = null;
     this.clickBufLow = null;
+    const ctx = this.ctx;
+    this.ctx = null;
     this.resumeInflight = null;
+    this.startInflight = false;
     if (ctx) void ctx.close();
   }
 
@@ -351,41 +398,76 @@ export class Metronome {
         (window as unknown as { webkitAudioContext: typeof AudioContext })
           .webkitAudioContext;
       this.ctx = new Ctx();
-      this.master = this.ctx.createGain();
-      this.master.gain.value = this.volume;
-      this.master.connect(this.ctx.destination);
+      this.mediaGain = this.ctx.createGain();
+      this.mediaGain.gain.value = 1;
+      this.mediaGain.connect(this.ctx.destination);
+      this.clickGain = this.ctx.createGain();
+      this.clickGain.gain.value = this.volume;
+      this.clickGain.connect(this.ctx.destination);
       this.ensureClickBuffers(this.ctx);
     }
     return this.ctx;
   }
 
-  /** Pre-render short decaying sine bursts (downbeat = higher pitch). */
-  private ensureClickBuffers(ctx: AudioContext): void {
-    if (this.clickBufHigh && this.clickBufLow) return;
-    this.clickBufHigh = this.makeClickBuffer(ctx, 1200);
-    this.clickBufLow = this.makeClickBuffer(ctx, 800);
+  /** Wire MediaElementSource once; never disconnect during the session. */
+  private ensureMediaRouted(ctx: AudioContext): void {
+    if (!this.mediaGain) {
+      this.mediaGain = ctx.createGain();
+      this.mediaGain.gain.value = 1;
+      this.mediaGain.connect(ctx.destination);
+    }
+    if (!this.mediaEl || this.mediaSource) return;
+    this.mediaSource = ctx.createMediaElementSource(this.mediaEl);
+    this.mediaSource.connect(this.mediaGain);
   }
 
-  private makeClickBuffer(ctx: AudioContext, freqHz: number): AudioBuffer {
+  private ensureClickBuffers(ctx: AudioContext): void {
+    if (this.clickBufHigh && this.clickBufLow) return;
+    this.clickBufHigh = this.makeClickBuffer(ctx, 1500, 1);
+    this.clickBufLow = this.makeClickBuffer(ctx, 900, 0.85);
+  }
+
+  /**
+   * Hot click sample: bright sine + tiny noise transient, peak-normalized to ~1.
+   * Short enough not to muddy the track, loud enough to cut through.
+   */
+  private makeClickBuffer(
+    ctx: AudioContext,
+    freqHz: number,
+    peak: number,
+  ): AudioBuffer {
     const sr = ctx.sampleRate;
-    const dur = 0.04;
+    const dur = 0.055;
     const len = Math.max(1, Math.floor(sr * dur));
     const buf = ctx.createBuffer(1, len, sr);
     const data = buf.getChannelData(0);
+    let maxAbs = 0;
     for (let i = 0; i < len; i++) {
       const t = i / sr;
-      // Fast exponential decay — audible even under a dense track.
-      data[i] = Math.exp(-t * 70) * Math.sin(2 * Math.PI * freqHz * t);
+      const env = Math.exp(-t * 55);
+      const click =
+        Math.sin(2 * Math.PI * freqHz * t) * 0.85 +
+        Math.sin(2 * Math.PI * freqHz * 2 * t) * 0.15;
+      // Brief noise tick at the attack so it reads as a “tick”, not a tone.
+      const noise = i < sr * 0.002 ? (Math.random() * 2 - 1) * 0.35 : 0;
+      const s = (click + noise) * env;
+      data[i] = s;
+      const a = Math.abs(s);
+      if (a > maxAbs) maxAbs = a;
+    }
+    if (maxAbs > 1e-6) {
+      const scale = peak / maxAbs;
+      for (let i = 0; i < len; i++) data[i]! *= scale;
     }
     return buf;
   }
 
-  /** Master stays at volume whenever Click is enabled (scheduling gates sound). */
-  private applyMasterGain(): void {
-    if (!this.master || !this.ctx) return;
+  private applyClickGain(): void {
+    if (!this.clickGain || !this.ctx) return;
     const now = this.ctx.currentTime;
-    this.master.gain.cancelScheduledValues(now);
-    this.master.gain.setValueAtTime(this.enabled ? this.volume : 0, now);
+    this.clickGain.gain.cancelScheduledValues(now);
+    // When enabled, keep click bus open at the user volume (even while paused).
+    this.clickGain.gain.setValueAtTime(this.enabled ? this.volume : 0, now);
   }
 
   private beatDurationSec(): number {
@@ -410,29 +492,37 @@ export class Metronome {
   private startScheduler(): void {
     this.stopScheduler();
     const epoch = this.schedulerEpoch;
+    this.startInflight = true;
     const begin = async () => {
-      if (epoch !== this.schedulerEpoch) return;
-      if (!this.playing || !this.enabled) return;
-      // Never silent-bail on a non-running context — resume again under the
-      // same gesture chain so ticks actually reach the destination.
-      await this.resume();
-      if (epoch !== this.schedulerEpoch) return;
-      if (!this.playing || !this.enabled || !this.ctx) return;
-      this.scheduledBeats.clear();
-      this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
-      this.applyMasterGain();
-      if (this.timer != null) {
-        clearInterval(this.timer);
-        this.timer = null;
+      try {
+        if (epoch !== this.schedulerEpoch) return;
+        if (!this.playing || !this.enabled) return;
+        await this.resume();
+        if (epoch !== this.schedulerEpoch) return;
+        if (!this.playing || !this.enabled || !this.ctx) return;
+        if (this.ctx.state !== "running") {
+          await this.ctx.resume();
+        }
+        if (epoch !== this.schedulerEpoch) return;
+        this.scheduledBeats.clear();
+        this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
+        this.applyClickGain();
+        if (this.timer != null) {
+          clearInterval(this.timer);
+          this.timer = null;
+        }
+        this.timer = window.setInterval(() => this.tick(), 25);
+        this.tick();
+      } finally {
+        if (epoch === this.schedulerEpoch) this.startInflight = false;
       }
-      this.timer = window.setInterval(() => this.tick(), 25);
-      this.tick();
     };
     void begin();
   }
 
   private stopScheduler(): void {
     this.schedulerEpoch += 1;
+    this.startInflight = false;
     if (this.timer != null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -460,8 +550,8 @@ export class Metronome {
 
   private tick(): void {
     const ctx = this.ctx;
-    const master = this.master;
-    if (!ctx || !master || !this.enabled || !this.playing) return;
+    const clickGain = this.clickGain;
+    if (!ctx || !clickGain || !this.enabled || !this.playing) return;
     if (ctx.state !== "running") {
       void ctx.resume();
       return;
@@ -506,8 +596,7 @@ export class Metronome {
     beatIndex: number,
   ): void {
     const ctx = this.ctx;
-    const master = this.master;
-    if (!ctx || !master) return;
+    if (!ctx || !this.clickGain) return;
     this.ensureClickBuffers(ctx);
 
     if (this.scheduledBeats.has(beatIndex)) return;
@@ -517,23 +606,33 @@ export class Metronome {
     if (!buf) return;
 
     this.scheduledBeats.add(beatIndex);
+    const level = downbeat ? 1 : 0.7;
+    this.fireBuffer(buf, Math.max(when, ctx.currentTime), level);
+  }
+
+  private fireBuffer(
+    buf: AudioBuffer,
+    when: number,
+    level: number,
+  ): void {
+    const ctx = this.ctx;
+    const clickGain = this.clickGain;
+    if (!ctx || !clickGain) return;
 
     const src = ctx.createBufferSource();
     const gain = ctx.createGain();
-    // Per-click level on top of master volume (downbeat louder).
-    gain.gain.value = downbeat ? 1 : 0.65;
+    gain.gain.value = level;
     src.buffer = buf;
     src.connect(gain);
-    gain.connect(master);
-    const t0 = Math.max(when, ctx.currentTime);
+    gain.connect(clickGain);
     this.pendingSources.push(src);
     this.clicksStarted += 1;
     try {
-      src.start(t0);
-      src.stop(t0 + buf.duration + 0.01);
+      src.start(when);
+      src.stop(when + buf.duration + 0.01);
     } catch {
-      // start() can throw if context is closing
       this.clicksStarted -= 1;
+      return;
     }
     src.onended = () => {
       const i = this.pendingSources.indexOf(src);

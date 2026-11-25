@@ -469,7 +469,8 @@ export function App() {
     wantPlayingRef.current = true;
     const gen = ++transportGenRef.current;
     try {
-      // Resume click AudioContext under this gesture (does not route media).
+      // Under this Play gesture: resume shared AudioContext + wire MES (once)
+      // so track and click share the same output device, then start media.
       await metronomeRef.current?.resume();
       if (gen !== transportGenRef.current) {
         wantPlayingRef.current = false;
@@ -482,10 +483,6 @@ export function App() {
         metronomeRef.current?.setPlaying(false);
         return;
       }
-      // Media is audible immediately (native element). Arm playhead + click now.
-      // setPlaying starts the click scheduler synchronously when the context is
-      // already running — do not lockToMediaClock() here (that cleared the first
-      // scheduled ticks and raced the React playing effect).
       playingRef.current = true;
       setCurrentTime(audio.currentTime);
       metronomeRef.current?.setPlaying(true);
@@ -546,8 +543,11 @@ export function App() {
         e.preventDefault();
         setProject((p) => {
           const next = !p.settings.metronomeEnabled;
-          // Sync metronome immediately — don't wait for the settings effect.
           metronomeRef.current?.setEnabled(next);
+          // Immediate audible proof on the same key gesture when enabling mid-play.
+          if (next && playingRef.current) {
+            void metronomeRef.current?.audition();
+          }
           return updateSettings(p, { metronomeEnabled: next });
         });
         return;
@@ -1205,6 +1205,9 @@ export function App() {
               const on = e.target.checked;
               // Apply immediately so Play in the same turn already sees Click on.
               metronomeRef.current?.setEnabled(on);
+              if (on && playingRef.current) {
+                void metronomeRef.current?.audition();
+              }
               setProject((p) =>
                 updateSettings(p, { metronomeEnabled: on }),
               );

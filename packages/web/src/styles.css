@@ -226,13 +226,13 @@ input[type="color"] {
   width: 4.5rem;
 }
 
-/* BPM is typically ≤999 — keep the field ~3 digits wide. */
+/* BPM typically ≤999 — wide enough for three digits (e.g. 128), not a long number field. */
 .bpm-field .bpm-input {
-  width: 3.5ch;
-  min-width: 3.5ch;
-  max-width: 4.5ch;
-  padding-left: 0.35rem;
-  padding-right: 0.35rem;
+  width: 5.5ch;
+  min-width: 5.5ch;
+  max-width: 6.5ch;
+  padding-left: 0.4rem;
+  padding-right: 0.4rem;
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
