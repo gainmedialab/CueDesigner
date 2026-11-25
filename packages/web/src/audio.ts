@@ -219,20 +219,25 @@ export interface MetronomeGrid {
  * stable media/ctx anchor captured on play/seek.
  *
  * Important:
- * - Create the AudioContext + MediaElementSource lazily on the first user-gesture
- *   `resume()` (not on mount). A suspended context with a live MediaElementSource
- *   is a common source of mute/glitch on play.
- * - Never disconnect/reconnect the MediaElementSource during the session.
- * - Do not re-anchor on small `currentTime` quanta — HTMLMediaElement.currentTime
- *   jumps in ~50–250ms steps; a tight drift threshold cancels pending clicks and
- *   makes the metronome sound severely out of sync / glitchy.
+ * - One stable graph for the session: lazy create on first user-gesture `resume()`,
+ *   never disconnect/reconnect MediaElementSource.
+ * - Single-flight `resume()`; scheduler start uses an epoch so overlapping play
+ *   presses cannot leave two intervals or double-schedule clicks.
+ * - Media runs through a GainNode so pause can mute graph tails immediately.
+ * - Do not re-anchor on small `currentTime` quanta (~50–250ms steps).
  */
 export class Metronome {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  /** MediaElementSource → mediaGain → destination (mute on stop without reconnect). */
+  private mediaGain: GainNode | null = null;
   private mediaSource: MediaElementAudioSourceNode | null = null;
   private mediaEl: HTMLMediaElement | null = null;
   private timer: number | null = null;
+  /** Bumps on every stop/start so stale resume().then callbacks bail out. */
+  private schedulerEpoch = 0;
+  /** Shared in-flight resume so rapid Play cannot stack ctx.resume(). */
+  private resumeInflight: Promise<void> | null = null;
   private nextBeatIndex = 0;
   private enabled = false;
   private volume = 0.5;
@@ -267,7 +272,7 @@ export class Metronome {
 
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(1, v));
-    if (this.master && this.ctx) {
+    if (this.master && this.ctx && this.playing) {
       this.master.gain.setTargetAtTime(
         this.volume,
         this.ctx.currentTime,
@@ -298,33 +303,51 @@ export class Metronome {
     this.mediaEl = audio;
   }
 
-  /** Call when transport play/pause changes. */
+  /**
+   * Transport play/pause. Idempotent: repeated `true` while already playing does
+   * not restart the scheduler (avoids double intervals from React effect + sync call).
+   */
   setPlaying(playing: boolean): void {
+    if (this.playing === playing) {
+      if (playing && this.enabled && this.timer == null) {
+        this.startScheduler();
+      }
+      return;
+    }
     this.playing = playing;
     if (playing) {
+      this.setMediaAudible(true);
       if (this.enabled) this.startScheduler();
+      else this.restoreClickGain();
     } else {
       this.stopScheduler();
+      this.setMediaAudible(false);
     }
   }
 
   /**
    * Ensure shared AudioContext + MediaElementSource exist and the context is
-   * running. Call from a user gesture *before* `audio.play()` so the track is
-   * never audible through the element default path, then stolen mid-note.
+   * running. Single-flight: concurrent callers share one promise.
    */
   async resume(): Promise<void> {
-    const ctx = this.getOrCreateCtx();
-    this.ensureMediaRouted(ctx);
-    if (ctx.state === "suspended") {
-      await ctx.resume();
-    }
+    if (this.resumeInflight) return this.resumeInflight;
+    this.resumeInflight = (async () => {
+      const ctx = this.getOrCreateCtx();
+      this.ensureMediaRouted(ctx);
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+    })().finally(() => {
+      this.resumeInflight = null;
+    });
+    return this.resumeInflight;
   }
 
-  /** Call after seeks (and when media currentTime jumps) so clicks re-lock. */
+  /** Call after seeks so clicks re-lock without tearing down the scheduler. */
   resync(): void {
     this.clearPending();
     this.scheduledBeats.clear();
+    if (!this.ctx) return;
     this.captureAnchor();
     this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
   }
@@ -338,12 +361,19 @@ export class Metronome {
     } catch {
       // already disconnected
     }
+    try {
+      this.mediaGain?.disconnect();
+    } catch {
+      // already disconnected
+    }
     this.mediaSource = null;
+    this.mediaGain = null;
     this.mediaEl = null;
     const ctx = this.ctx;
     this.ctx = null;
     this.master = null;
     this.anchored = false;
+    this.resumeInflight = null;
     if (ctx) void ctx.close();
   }
 
@@ -351,17 +381,40 @@ export class Metronome {
     if (!this.ctx) {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
-      this.master.gain.value = this.volume;
+      this.master.gain.value = 0;
       this.master.connect(this.ctx.destination);
+      this.mediaGain = this.ctx.createGain();
+      this.mediaGain.gain.value = 0;
+      this.mediaGain.connect(this.ctx.destination);
     }
     return this.ctx;
   }
 
   /** Create MediaElementSource once; never reconnect during the session. */
   private ensureMediaRouted(ctx: AudioContext): void {
+    if (!this.mediaGain) {
+      this.mediaGain = ctx.createGain();
+      this.mediaGain.gain.value = this.playing ? 1 : 0;
+      this.mediaGain.connect(ctx.destination);
+    }
     if (!this.mediaEl || this.mediaSource) return;
     this.mediaSource = ctx.createMediaElementSource(this.mediaEl);
-    this.mediaSource.connect(ctx.destination);
+    this.mediaSource.connect(this.mediaGain);
+  }
+
+  /** Mute/unmute media graph (kills MediaElementSource tails without reconnect). */
+  private setMediaAudible(on: boolean): void {
+    if (!this.mediaGain || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.mediaGain.gain.cancelScheduledValues(now);
+    this.mediaGain.gain.setValueAtTime(on ? 1 : 0, now);
+  }
+
+  private restoreClickGain(): void {
+    if (!this.master || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.master.gain.cancelScheduledValues(now);
+    this.master.gain.setValueAtTime(this.playing ? this.volume : 0, now);
   }
 
   private captureAnchor(): void {
@@ -405,17 +458,25 @@ export class Metronome {
 
   private startScheduler(): void {
     this.stopScheduler();
+    const epoch = this.schedulerEpoch;
     void this.resume().then(() => {
+      if (epoch !== this.schedulerEpoch) return;
       if (!this.playing || !this.enabled) return;
       this.scheduledBeats.clear();
       this.captureAnchor();
       this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
+      this.restoreClickGain();
+      if (this.timer != null) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
       this.timer = window.setInterval(() => this.tick(), 25);
       this.tick();
     });
   }
 
   private stopScheduler(): void {
+    this.schedulerEpoch += 1;
     if (this.timer != null) {
       clearInterval(this.timer);
       this.timer = null;
@@ -423,11 +484,23 @@ export class Metronome {
     this.clearPending();
     this.scheduledBeats.clear();
     this.anchored = false;
+    if (this.master && this.ctx) {
+      const now = this.ctx.currentTime;
+      this.master.gain.cancelScheduledValues(now);
+      this.master.gain.setValueAtTime(0, now);
+    }
   }
 
   private clearPending(): void {
+    // Mute click bus before stopping oscillators to avoid stop() clicks.
+    if (this.master && this.ctx) {
+      const now = this.ctx.currentTime;
+      this.master.gain.cancelScheduledValues(now);
+      this.master.gain.setValueAtTime(0, now);
+    }
     for (const osc of this.pendingOsc) {
       try {
+        osc.onended = null;
         osc.stop();
       } catch {
         // already stopped
@@ -439,6 +512,7 @@ export class Metronome {
       }
     }
     this.pendingOsc = [];
+    if (this.playing && this.enabled) this.restoreClickGain();
   }
 
   private tick(): void {

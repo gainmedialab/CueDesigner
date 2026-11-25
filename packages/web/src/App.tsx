@@ -119,6 +119,10 @@ export function App() {
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
   const metronomeRef = useRef<Metronome | null>(null);
+  /** Invalidates in-flight play() when Play is pressed again / paused mid-start. */
+  const transportGenRef = useRef(0);
+  /** Desired transport state — true while playing or an async play() is in flight. */
+  const wantPlayingRef = useRef(false);
   /** After zoom, restore scroll so this time stays under cursorX in the scrollport. */
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
@@ -177,7 +181,12 @@ export function App() {
     metronomeRef.current = metronome;
     metronome.setMediaTimeGetter(() => audioRef.current?.currentTime ?? 0);
     metronome.attachMediaElement(audio);
-    const onEnded = () => setPlaying(false);
+    const onEnded = () => {
+      wantPlayingRef.current = false;
+      transportGenRef.current += 1;
+      metronomeRef.current?.setPlaying(false);
+      setPlaying(false);
+    };
     const onSeeked = () => metronomeRef.current?.resync();
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("seeked", onSeeked);
@@ -440,21 +449,40 @@ export function App() {
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !mediaUrl) return;
-    if (playing) {
+    // Treat in-flight play as "playing" so a second Space/Play pauses cleanly.
+    if (playing || wantPlayingRef.current) {
+      wantPlayingRef.current = false;
+      transportGenRef.current += 1;
+      metronomeRef.current?.setPlaying(false);
       audio.pause();
       setPlaying(false);
-    } else {
-      // Clear scroll suspension; checkbox preference stays latched.
-      setFollowSuspended(false);
-      try {
-        // Build/resume shared AudioContext + MediaElementSource under this gesture
-        // *before* play so the element never starts on the default output path.
-        await metronomeRef.current?.resume();
-        await audio.play();
-        setPlaying(true);
-      } catch (err) {
-        setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // Clear scroll suspension; checkbox preference stays latched.
+    setFollowSuspended(false);
+    wantPlayingRef.current = true;
+    const gen = ++transportGenRef.current;
+    try {
+      // Build/resume shared graph under this gesture *before* play.
+      await metronomeRef.current?.resume();
+      if (gen !== transportGenRef.current) return;
+      // Unmute media + arm click *before* element.play so audio never starts
+      // into a muted MediaElementSource (trail/glitch on rapid Play).
+      metronomeRef.current?.setPlaying(true);
+      await audio.play();
+      if (gen !== transportGenRef.current) {
+        audio.pause();
+        metronomeRef.current?.setPlaying(false);
+        return;
       }
+      // React effect is idempotent (already playing on metronome).
+      setPlaying(true);
+    } catch (err) {
+      if (gen !== transportGenRef.current) return;
+      wantPlayingRef.current = false;
+      metronomeRef.current?.setPlaying(false);
+      setPlaying(false);
+      setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, [mediaUrl, playing]);
 
