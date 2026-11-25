@@ -486,14 +486,24 @@ export function App() {
     e: ReactPointerEvent<HTMLDivElement>,
     cue: Cue,
   ) => {
+    // Keep cue drag from seeking the lane or panning the zoomed timeline/waveform.
     e.stopPropagation();
+    e.preventDefault();
+    if (e.button !== 0) return;
+
     setSelectedCueId(cue.id);
     setActiveDeptId(cue.departmentId);
     dragCueIdRef.current = cue.id;
 
+    const marker = e.currentTarget;
+    marker.setPointerCapture(e.pointerId);
+
     // Map against the track-lane (cue % left), not .tracks (includes labels).
-    const lane = e.currentTarget.parentElement;
+    const lane = marker.parentElement;
     if (!lane) return;
+
+    const scrollEl = timelineScrollRef.current;
+    const lockedScrollLeft = scrollEl?.scrollLeft ?? 0;
 
     const startRect = lane.getBoundingClientRect();
     const startWidth = startRect.width || 1;
@@ -504,6 +514,10 @@ export function App() {
 
     const onMove = (ev: PointerEvent) => {
       if (!dragCueIdRef.current) return;
+      // Reject scrollport pan that can ride along with cue drag when zoomed.
+      if (scrollEl && scrollEl.scrollLeft !== lockedScrollLeft) {
+        scrollEl.scrollLeft = lockedScrollLeft;
+      }
       const rect = lane.getBoundingClientRect();
       const width = rect.width || 1;
       const pointerT = ((ev.clientX - rect.left) / width) * (duration || 1);
@@ -516,13 +530,18 @@ export function App() {
         });
       });
     };
-    const onUp = () => {
+    const onUp = (ev: PointerEvent) => {
       dragCueIdRef.current = null;
+      if (marker.hasPointerCapture(ev.pointerId)) {
+        marker.releasePointerCapture(ev.pointerId);
+      }
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   };
 
   const selectedCue = project.cues.find((c) => c.id === selectedCueId) ?? null;
