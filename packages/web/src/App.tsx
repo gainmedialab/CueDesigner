@@ -10,11 +10,17 @@ import {
   deserializeProject,
   formatAbsoluteTime,
   formatMusicalPosition,
+  formatTime,
+  formatTimecode,
+  FRAME_RATE_LABELS,
   GRID_RESOLUTIONS,
   gridLineTimes,
   gridResolutionLabel,
   moveCue,
+  musicalRulerMarkTimes,
   nextDeptCueNumber,
+  parseTime,
+  parseTimecode,
   placeCue,
   projectDownloadBlob,
   renameDepartment,
@@ -22,12 +28,18 @@ import {
   rulerMarkTimes,
   setProjectMedia,
   snapToGrid,
+  TIME_DISPLAY_MODES,
+  timeDisplayModeLabel,
+  timeFieldLabel,
+  timeInputPlaceholder,
   touchProject,
   updateCue,
   updateSettings,
   type Cue,
+  type FrameRateLabel,
   type GridResolution,
   type Project,
+  type TimeDisplayMode,
 } from "@cuedesigner/core";
 import {
   useCallback,
@@ -75,6 +87,12 @@ export function App() {
   const [status, setStatus] = useState("New project — import audio to begin.");
   const [newDeptName, setNewDeptName] = useState("");
   const [newDeptColor, setNewDeptColor] = useState("#5b8def");
+  /** Session UI preference — storage stays absolute seconds. */
+  const [timeMode, setTimeMode] = useState<TimeDisplayMode>("absolute");
+  const [inspectorTimeDraft, setInspectorTimeDraft] = useState<string | null>(
+    null,
+  );
+  const [tcOffsetDraft, setTcOffsetDraft] = useState<string | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
@@ -98,6 +116,15 @@ export function App() {
       setActiveDeptId(project.departments[0]?.id ?? "");
     }
   }, [project.departments, activeDeptId]);
+
+  // Drop in-progress time drafts when the target or mode changes
+  useEffect(() => {
+    setInspectorTimeDraft(null);
+  }, [selectedCueId, timeMode]);
+
+  useEffect(() => {
+    setTcOffsetDraft(null);
+  }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
   // Audio element lifecycle
   useEffect(() => {
@@ -449,9 +476,8 @@ export function App() {
       touchProject({ ...p, cues: placeCue(p.cues, draft) }),
     );
     setSelectedCueId(draft.id);
-    const musical = formatMusicalPosition(tAbs, project.settings);
     setStatus(
-      `Placed cue at ${formatAbsoluteTime(tAbs)} (${musical})${
+      `Placed cue at ${formatTime(tAbs, timeMode, project.settings)}${
         bypassSnap || !project.settings.snapEnabled ? " — free" : " — snapped"
       }`,
     );
@@ -560,12 +586,56 @@ export function App() {
 
   const laneContentW = Math.max(0, scrollPortW * zoom - TRACK_LABEL_W);
   const rulerMarks =
-    duration > 0 ? rulerMarkTimes(duration, laneContentW || scrollPortW) : [];
+    duration > 0
+      ? timeMode === "musical"
+        ? musicalRulerMarkTimes(
+            project.settings,
+            duration,
+            laneContentW || scrollPortW,
+          )
+        : rulerMarkTimes(duration, laneContentW || scrollPortW)
+      : [];
 
-  const musicalNow = formatMusicalPosition(currentTime, project.settings);
+  const clockNow = formatTime(currentTime, timeMode, project.settings);
+  const clockEnd = formatTime(duration, timeMode, project.settings);
   const [sigNum, sigDen] = project.settings.timeSignature;
   const zoomLabel =
     zoom >= 10 ? `${Math.round(zoom)}×` : `${zoom.toFixed(1)}×`;
+  const tcOffsetDisplay =
+    tcOffsetDraft ??
+    formatTimecode(project.settings.showTcOffsetSec, project.settings.fps);
+
+  const commitInspectorTime = () => {
+    if (inspectorTimeDraft == null || !selectedCueId) {
+      setInspectorTimeDraft(null);
+      return;
+    }
+    const parsed = parseTime(
+      inspectorTimeDraft,
+      timeMode,
+      project.settings,
+    );
+    if (parsed != null) {
+      setProject((p) =>
+        touchProject({
+          ...p,
+          cues: moveCue(p.cues, selectedCueId, Math.max(0, parsed)),
+        }),
+      );
+    }
+    setInspectorTimeDraft(null);
+  };
+
+  const commitTcOffset = () => {
+    if (tcOffsetDraft == null) return;
+    const parsed = parseTimecode(tcOffsetDraft, project.settings.fps);
+    if (parsed != null) {
+      setProject((p) =>
+        updateSettings(p, { showTcOffsetSec: Math.max(0, parsed) }),
+      );
+    }
+    setTcOffsetDraft(null);
+  };
 
   return (
     <div className="app">
@@ -576,7 +646,7 @@ export function App() {
         <div className="meta">
           {project.name}
           {project.media ? ` · ${project.media.name}` : " · no media"}
-          {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen}`}
+          {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen} · ${project.settings.fps}`}
         </div>
         <div className="actions">
           <button type="button" onClick={onNewProject}>
@@ -619,10 +689,34 @@ export function App() {
         <button type="button" onClick={() => seek(0)} disabled={!mediaUrl}>
           ⇤
         </button>
+        <div
+          className="mode-switch"
+          role="group"
+          aria-label="Time display mode"
+        >
+          {TIME_DISPLAY_MODES.map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={timeMode === mode ? "mode-btn active" : "mode-btn"}
+              aria-pressed={timeMode === mode}
+              onClick={() => setTimeMode(mode)}
+              title={timeDisplayModeLabel(mode)}
+            >
+              {mode === "absolute"
+                ? "Abs"
+                : mode === "timecode"
+                  ? "TC"
+                  : "Mus"}
+            </button>
+          ))}
+        </div>
         <div className="clock-block">
-          <span className="clock">{formatAbsoluteTime(currentTime)}</span>
-          <span className="clock-musical" title="Musical position (bar.beat)">
-            {musicalNow}
+          <span className="clock" title={timeDisplayModeLabel(timeMode)}>
+            {clockNow}
+          </span>
+          <span className="clock-mode-label">
+            {timeDisplayModeLabel(timeMode)}
           </span>
         </div>
         <input
@@ -636,7 +730,7 @@ export function App() {
           onChange={(e) => seek(Number(e.target.value))}
         />
         <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
-          {formatAbsoluteTime(duration)}
+          {clockEnd}
         </span>
         <button
           type="button"
@@ -721,6 +815,44 @@ export function App() {
             }}
           />
           <span className="unit">s</span>
+        </label>
+        <label className="grid-field">
+          FPS
+          <select
+            value={project.settings.fps}
+            title="Project frame rate for show timecode"
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, {
+                  fps: e.target.value as FrameRateLabel,
+                }),
+              )
+            }
+          >
+            {FRAME_RATE_LABELS.map((label) => (
+              <option key={label} value={label}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid-field">
+          TC offset
+          <input
+            type="text"
+            className="tc-offset-input"
+            value={tcOffsetDisplay}
+            spellCheck={false}
+            title="Show timecode at file start (HH:MM:SS:FF)"
+            placeholder="HH:MM:SS:FF"
+            onChange={(e) => setTcOffsetDraft(e.target.value)}
+            onBlur={commitTcOffset}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+          />
         </label>
         <label className="grid-field">
           Snap
@@ -916,7 +1048,7 @@ export function App() {
             >
               <div className="ruler-row">
                 <div className="ruler-gutter" aria-hidden />
-                <div className="ruler">
+                <div className="ruler" data-mode={timeMode}>
                   {rulerMarks.map((t, i) => {
                     const pct = duration > 0 ? (t / duration) * 100 : 0;
                     return (
@@ -925,10 +1057,7 @@ export function App() {
                         className="ruler-mark"
                         style={{ left: `${pct}%` }}
                       >
-                        {formatAbsoluteTime(t)}
-                        <span className="ruler-musical">
-                          {formatMusicalPosition(t, project.settings)}
-                        </span>
+                        {formatTime(t, timeMode, project.settings)}
                       </span>
                     );
                   })}
@@ -972,7 +1101,7 @@ export function App() {
                               key={c.id}
                               className={`cue-marker${c.id === selectedCueId ? " selected" : ""}`}
                               style={{ left, background: d.color }}
-                              title={`${c.cueNoDept} ${c.label} · ${formatAbsoluteTime(c.tAbs)} · ${formatMusicalPosition(c.tAbs, project.settings)}`}
+                              title={`${c.cueNoDept} ${c.label} · ${formatTime(c.tAbs, timeMode, project.settings)}`}
                               onPointerDown={(e) => onCuePointerDown(e, c)}
                             />
                           );
@@ -1005,7 +1134,9 @@ export function App() {
                       seek(c.tAbs);
                     }}
                   >
-                    <span className="t">{formatAbsoluteTime(c.tAbs)}</span>
+                    <span className="t">
+                      {formatTime(c.tAbs, timeMode, project.settings)}
+                    </span>
                     <span className="label">
                       <span style={{ color: dept?.color }}>{dept?.name ?? "?"}</span>
                       {" · "}
@@ -1070,28 +1201,30 @@ export function App() {
                 />
               </label>
               <label>
-                Time (s)
+                {timeFieldLabel(timeMode)}
                 <input
-                  type="number"
-                  step={0.001}
-                  min={0}
-                  value={selectedCue.tAbs}
-                  onChange={(e) =>
-                    setProject((p) =>
-                      touchProject({
-                        ...p,
-                        cues: moveCue(
-                          p.cues,
-                          selectedCue.id,
-                          Number(e.target.value) || 0,
-                        ),
-                      }),
-                    )
+                  type="text"
+                  spellCheck={false}
+                  value={
+                    inspectorTimeDraft ??
+                    formatTime(selectedCue.tAbs, timeMode, project.settings)
                   }
+                  placeholder={timeInputPlaceholder(timeMode)}
+                  onChange={(e) => setInspectorTimeDraft(e.target.value)}
+                  onBlur={commitInspectorTime}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
                 />
               </label>
               <div className="inspector-meta">
-                Musical:{" "}
+                Abs {formatAbsoluteTime(selectedCue.tAbs)}
+                {" · "}
+                TC{" "}
+                {formatTime(selectedCue.tAbs, "timecode", project.settings)}
+                {" · "}
                 {formatMusicalPosition(selectedCue.tAbs, project.settings)}
               </div>
               <button

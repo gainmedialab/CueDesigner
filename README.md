@@ -1,6 +1,6 @@
 # CueDesigner
 
-Timecode-controlled live-show cue programmer (desktop + web). Phase 0 foundations plus Phase 1 BPM magnetic snap: project model, audio import/transport, department tracks, cue CRUD, BPM/grid snap, offline JSON save/load with media restore.
+Timecode-controlled live-show cue programmer (desktop + web). Phase 0 foundations plus Phase 1 BPM snap and absolute / show TC / musical time views: project model, audio import/transport, department tracks, cue CRUD, BPM/grid snap, offline JSON save/load with media restore.
 
 **Planning and export only. This software does not arm, enable, or fire pyrotechnic or SFX hardware.**
 
@@ -76,13 +76,27 @@ Use the **BPM bar** under transport:
 | **Downbeat** | Offset of bar 1 beat 1 from file start (seconds) |
 | **Snap** | Grid resolution: Bar, Beat, 1/4, 1/8, 1/16, 1/32 |
 | **Magnetic snap** | When on, place/drag snaps to the grid |
+| **FPS** | Project frame rate for show TC: 23.976, 24, 25, 29.97 DF, 29.97 NDF, 30 |
+| **TC offset** | Show timecode at file start (`HH:MM:SS:FF` / `;FF` for DF) |
 | **Zoom** | Timeline horizontal zoom (`−` / slider / `+`); denser ruler labels when zoomed |
 
-**Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid; the clock also shows a musical **bar.beat** stub. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`, `timelineZoom`).
+**Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`, `timelineZoom`, `fps`, `showTcOffsetSec`).
 
 **Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 
-LTC/MTC, export packs, and a full absolute/TC/musical ruler switch are deferred.
+## Time display modes (Phase 1)
+
+Transport **Abs / TC / Mus** switches the clock, timeline ruler, cue list, and inspector together:
+
+| Mode | Format | Notes |
+|------|--------|--------|
+| **Absolute** | `mm:ss.mmm` | File-relative |
+| **Show TC** | `HH:MM:SS:FF` (`;FF` when DF) | Uses project **FPS** + **TC offset** |
+| **Musical** | `bar.beat` / `bar.beat.sub` | From BPM, time signature, and downbeat |
+
+Canonical storage remains **file-relative absolute seconds** (`cue.tAbs`). Editing in any mode parses back to absolute; the inspector also shows Abs · TC · musical as a cross-check.
+
+Live LTC/MTC I/O hardware and export packs are deferred.
 
 ## Save / Open and media (offline-first)
 
@@ -111,7 +125,8 @@ Folder / sidecar packages (copy media next to JSON) are planned for a later phas
       "gridResolution": "1/4",
       "snapEnabled": true,
       "timelineZoom": 1,
-      "fps": "25"
+      "fps": "25",
+      "showTcOffsetSec": 0
     },
     "departments": [],
     "cues": [],
@@ -121,7 +136,7 @@ Folder / sidecar packages (copy media next to JSON) are planned for a later phas
 }
 ```
 
-Canonical cue time is **file-relative absolute seconds**. Musical **bar.beat** is shown as a derived view from BPM + downbeat; show TC and a full ruler mode switch come later.
+Canonical cue time is **file-relative absolute seconds**. Show TC and musical **bar.beat** are derived views (fps + TC offset; BPM + downbeat).
 
 ## License
 

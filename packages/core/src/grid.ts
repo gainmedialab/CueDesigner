@@ -167,6 +167,40 @@ export function rulerMarkTimes(
       break;
     }
   }
+  return marksAtInterval(durationSec, interval);
+}
+
+/** Musical ruler marks at bar (and beat when dense enough) boundaries. */
+export function musicalRulerMarkTimes(
+  settings: Pick<
+    ProjectSettings,
+    "bpm" | "timeSignature" | "downbeatOffsetSec"
+  >,
+  durationSec: number,
+  contentWidthPx: number,
+  targetPx = 80,
+): number[] {
+  if (!(durationSec > 0) || !(contentWidthPx > 0)) return [];
+  const barSec = barDurationSec(settings.bpm, settings.timeSignature);
+  const beatSec = beatDurationSec(settings.bpm, settings.timeSignature);
+  if (!(barSec > 0) || !(beatSec > 0)) return [];
+  const idealSec = (targetPx / contentWidthPx) * durationSec;
+  const step = beatSec >= idealSec * 0.55 ? beatSec : barSec;
+  const origin = settings.downbeatOffsetSec || 0;
+  const marks: number[] = [];
+  const startIdx = Math.ceil((0 - origin) / step - 1e-9);
+  const endIdx = Math.floor((durationSec - origin) / step + 1e-9);
+  for (let i = startIdx; i <= endIdx; i++) {
+    const t = origin + i * step;
+    if (t < -1e-9 || t > durationSec + 1e-9) continue;
+    marks.push(Math.max(0, Math.min(durationSec, t)));
+  }
+  if (marks.length === 0 || marks[0]! > 0) marks.unshift(0);
+  if (marks[marks.length - 1]! < durationSec - 1e-6) marks.push(durationSec);
+  return marks;
+}
+
+function marksAtInterval(durationSec: number, interval: number): number[] {
   const marks: number[] = [];
   const end = Math.ceil(durationSec / interval);
   for (let i = 0; i <= end; i++) {

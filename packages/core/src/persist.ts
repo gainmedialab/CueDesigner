@@ -1,4 +1,5 @@
 import { clampTimelineZoom, defaultSettings } from "./project.js";
+import { isFrameRateLabel } from "./time.js";
 import {
   PROJECT_SCHEMA_VERSION,
   type GridResolution,
@@ -56,10 +57,10 @@ function normalizeSettings(raw: unknown): ProjectSettings {
       ? clampTimelineZoom(s.timelineZoom)
       : defaults.timelineZoom;
   const fps =
-    typeof s.fps === "string" ? (s.fps as ProjectSettings["fps"]) : defaults.fps;
+    typeof s.fps === "string" && isFrameRateLabel(s.fps) ? s.fps : defaults.fps;
   const showTcOffsetSec =
     typeof s.showTcOffsetSec === "number" && Number.isFinite(s.showTcOffsetSec)
-      ? s.showTcOffsetSec
+      ? Math.max(0, s.showTcOffsetSec)
       : defaults.showTcOffsetSec;
   return {
     bpm,
