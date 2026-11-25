@@ -214,27 +214,18 @@ export interface MetronomeGrid {
  * Schedules short clicks on the musical beat grid while media plays.
  * Accent on bar downbeats. Times use the same origin as snap/grid (`downbeatOffsetSec`).
  *
- * Clock model: route the HTMLMediaElement through the same AudioContext as the
- * click synth (MediaElementSource), and convert media tAbs → context time via a
- * stable media/ctx anchor captured on play/seek.
+ * Media plays through the HTMLMediaElement's native output (always audible).
+ * Clicks use a dedicated AudioContext. MediaElementSource was removed: routing
+ * the element through a muteable GainNode caused total silence after Pause→Play
+ * and made heard audio lag currentTime/playhead after resume.
  *
- * Important:
- * - One stable graph for the session: lazy create on first user-gesture `resume()`,
- *   never disconnect/reconnect MediaElementSource.
- * - Single-flight `resume()`; scheduler start uses an epoch so overlapping play
- *   presses cannot leave two intervals or double-schedule clicks.
- * - Media runs through a GainNode so pause can mute graph tails immediately.
- * - Re-anchor (`lockToMediaClock`) after every play()/seek once media is running;
- *   never capture the media↔ctx anchor while currentTime is still frozen.
- * - Do not re-anchor on small `currentTime` quanta (~50–250ms steps).
+ * Scheduling: look-ahead from live `HTMLMediaElement.currentTime`, each beat
+ * index scheduled once. `lockToMediaClock()` on play/seek clears pending clicks
+ * and resets the beat cursor — never thrash on currentTime quanta.
  */
 export class Metronome {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
-  /** MediaElementSource → mediaGain → destination (mute on stop without reconnect). */
-  private mediaGain: GainNode | null = null;
-  private mediaSource: MediaElementAudioSourceNode | null = null;
-  private mediaEl: HTMLMediaElement | null = null;
   private timer: number | null = null;
   /** Bumps on every stop/start so stale resume().then callbacks bail out. */
   private schedulerEpoch = 0;
@@ -250,21 +241,10 @@ export class Metronome {
     downbeatOffsetSec: 0,
   };
   private getMediaTime: () => number = () => 0;
-  /** Media time at last anchor capture. */
-  private anchorMedia = 0;
-  /** AudioContext.currentTime at last anchor capture. */
-  private anchorCtx = 0;
-  private anchored = false;
   private pendingOsc: OscillatorNode[] = [];
   /** Beat indices already scheduled for this play/seek window (dedupe). */
   private scheduledBeats = new Set<number>();
-  private readonly lookAheadSec = 0.1;
-  private readonly scheduleHorizonSec = 0.35;
-  /**
-   * Re-anchor only on real seeks/stalls — must stay well above typical
-   * HTMLMediaElement.currentTime quantization (~50–250ms).
-   */
-  private readonly driftResyncSec = 0.22;
+  private readonly scheduleHorizonSec = 0.3;
 
   setEnabled(on: boolean): void {
     this.enabled = on;
@@ -274,9 +254,9 @@ export class Metronome {
 
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(1, v));
-    if (this.master && this.ctx && this.playing) {
+    if (this.master && this.ctx) {
       this.master.gain.setTargetAtTime(
-        this.volume,
+        this.playing ? this.volume : 0,
         this.ctx.currentTime,
         0.02,
       );
@@ -288,8 +268,7 @@ export class Metronome {
       ...grid,
       bpm: Number.isFinite(grid.bpm) && grid.bpm > 0 ? Math.round(grid.bpm) : 120,
     };
-    // Resync beat index from current media time on next tick
-    this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
+    this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
   }
 
   setMediaTimeGetter(fn: () => number): void {
@@ -297,29 +276,16 @@ export class Metronome {
   }
 
   /**
-   * Remember the media element. Graph wiring happens on `resume()` so the
-   * AudioContext is created under a user gesture and is not left suspended
-   * with a MediaElementSource attached at page load.
+   * Kept for call-site compatibility. Track audio is native HTMLMediaElement
+   * output — we intentionally do not create a MediaElementSource.
    */
-  attachMediaElement(audio: HTMLMediaElement): void {
-    this.mediaEl = audio;
+  attachMediaElement(_audio: HTMLMediaElement): void {
+    // no-op: native element output
   }
 
   /**
-   * Unmute the media GainNode without starting the click scheduler.
-   * Call before `audio.play()` so the element never starts into a muted graph.
-   */
-  primeMediaOutput(): void {
-    this.setMediaAudible(true);
-  }
-
-  /**
-   * Transport play/pause. Idempotent: repeated `true` while already playing does
-   * not restart the scheduler (avoids double intervals from React effect + sync call).
-   *
-   * Prefer: `primeMediaOutput()` → `await audio.play()` → `setPlaying(true)` →
-   * `lockToMediaClock()` so the media↔ctx anchor is taken after media is running
-   * (pause→play otherwise schedules clicks against a frozen currentTime).
+   * Transport play/pause. Idempotent when already in the requested state.
+   * Call only after `audio.play()` has resolved so `currentTime` is advancing.
    */
   setPlaying(playing: boolean): void {
     if (this.playing === playing) {
@@ -330,24 +296,17 @@ export class Metronome {
     }
     this.playing = playing;
     if (playing) {
-      this.setMediaAudible(true);
       if (this.enabled) this.startScheduler();
-      else this.restoreClickGain();
     } else {
       this.stopScheduler();
-      this.setMediaAudible(false);
     }
   }
 
-  /**
-   * Ensure shared AudioContext + MediaElementSource exist and the context is
-   * running. Single-flight: concurrent callers share one promise.
-   */
+  /** Ensure click AudioContext exists and is running (user gesture). */
   async resume(): Promise<void> {
     if (this.resumeInflight) return this.resumeInflight;
     this.resumeInflight = (async () => {
       const ctx = this.getOrCreateCtx();
-      this.ensureMediaRouted(ctx);
       if (ctx.state === "suspended") {
         await ctx.resume();
       }
@@ -358,45 +317,28 @@ export class Metronome {
   }
 
   /**
-   * Hard re-anchor to the live media clock: drop every pending click, then map
-   * media tAbs ↔ AudioContext.currentTime from the current `currentTime`.
-   * Call after seeks and after every resume-from-pause once `audio.play()` has
-   * resolved (and again on the element `playing` event as MediaElementSource settles).
+   * Drop every pending click and reset the beat cursor from live media time.
+   * Call after seeks and after every successful `audio.play()` (incl. Pause→Play).
    */
   lockToMediaClock(): void {
-    this.clearPending();
+    this.clearPending(false);
     this.scheduledBeats.clear();
-    if (!this.ctx) return;
-    this.captureAnchor();
-    this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
+    this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
+    if (this.playing && this.enabled) this.setClickAudible(true);
   }
 
-  /** @deprecated Prefer `lockToMediaClock` — same behavior. */
+  /** @deprecated Prefer `lockToMediaClock`. */
   resync(): void {
     this.lockToMediaClock();
   }
 
   dispose(): void {
     this.stopScheduler();
-    this.clearPending();
+    this.clearPending(false);
     this.scheduledBeats.clear();
-    try {
-      this.mediaSource?.disconnect();
-    } catch {
-      // already disconnected
-    }
-    try {
-      this.mediaGain?.disconnect();
-    } catch {
-      // already disconnected
-    }
-    this.mediaSource = null;
-    this.mediaGain = null;
-    this.mediaEl = null;
     const ctx = this.ctx;
     this.ctx = null;
     this.master = null;
-    this.anchored = false;
     this.resumeInflight = null;
     if (ctx) void ctx.close();
   }
@@ -407,64 +349,21 @@ export class Metronome {
       this.master = this.ctx.createGain();
       this.master.gain.value = 0;
       this.master.connect(this.ctx.destination);
-      this.mediaGain = this.ctx.createGain();
-      this.mediaGain.gain.value = 0;
-      this.mediaGain.connect(this.ctx.destination);
     }
     return this.ctx;
   }
 
-  /** Create MediaElementSource once; never reconnect during the session. */
-  private ensureMediaRouted(ctx: AudioContext): void {
-    if (!this.mediaGain) {
-      this.mediaGain = ctx.createGain();
-      this.mediaGain.gain.value = this.playing ? 1 : 0;
-      this.mediaGain.connect(ctx.destination);
-    }
-    if (!this.mediaEl || this.mediaSource) return;
-    this.mediaSource = ctx.createMediaElementSource(this.mediaEl);
-    this.mediaSource.connect(this.mediaGain);
-  }
-
-  /** Mute/unmute media graph (kills MediaElementSource tails without reconnect). */
-  private setMediaAudible(on: boolean): void {
-    if (!this.mediaGain || !this.ctx) return;
-    const now = this.ctx.currentTime;
-    this.mediaGain.gain.cancelScheduledValues(now);
-    this.mediaGain.gain.setValueAtTime(on ? 1 : 0, now);
-  }
-
-  private restoreClickGain(): void {
+  private setClickAudible(on: boolean): void {
     if (!this.master || !this.ctx) return;
     const now = this.ctx.currentTime;
     this.master.gain.cancelScheduledValues(now);
-    this.master.gain.setValueAtTime(this.playing ? this.volume : 0, now);
-  }
-
-  private captureAnchor(): void {
-    if (!this.ctx) return;
-    this.anchorMedia = this.getMediaTime();
-    this.anchorCtx = this.ctx.currentTime;
-    this.anchored = true;
-  }
-
-  /** Smooth media-time estimate from the AudioContext clock. */
-  private estimatedMediaTime(): number {
-    if (!this.ctx || !this.anchored) return this.getMediaTime();
-    return this.anchorMedia + (this.ctx.currentTime - this.anchorCtx);
-  }
-
-  /** Map a media (file-relative) time onto AudioContext.currentTime. */
-  private mediaToCtx(tMedia: number): number {
-    if (!this.ctx || !this.anchored) return this.ctx?.currentTime ?? 0;
-    return this.anchorCtx + (tMedia - this.anchorMedia);
+    this.master.gain.setValueAtTime(on ? this.volume : 0, now);
   }
 
   private beatDurationSec(): number {
     const bpmRaw = this.grid.bpm > 0 ? this.grid.bpm : 120;
     const bpm = Math.round(bpmRaw);
     const den = this.grid.timeSignature[1] > 0 ? this.grid.timeSignature[1] : 4;
-    // Same as core beatDurationSec: quarter-note BPM × (4/denominator).
     return (60 / bpm) * (4 / den);
   }
 
@@ -486,10 +385,8 @@ export class Metronome {
     void this.resume().then(() => {
       if (epoch !== this.schedulerEpoch) return;
       if (!this.playing || !this.enabled) return;
-      // Anchor from live media time — caller should have already started playback
-      // (see lockToMediaClock). Re-capture here so a late start still locks.
       this.lockToMediaClock();
-      this.restoreClickGain();
+      this.setClickAudible(true);
       if (this.timer != null) {
         clearInterval(this.timer);
         this.timer = null;
@@ -505,18 +402,13 @@ export class Metronome {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.clearPending();
+    this.clearPending(false);
     this.scheduledBeats.clear();
-    this.anchored = false;
-    if (this.master && this.ctx) {
-      const now = this.ctx.currentTime;
-      this.master.gain.cancelScheduledValues(now);
-      this.master.gain.setValueAtTime(0, now);
-    }
+    this.setClickAudible(false);
   }
 
-  private clearPending(): void {
-    // Mute click bus before stopping oscillators to avoid stop() clicks.
+  /** Stop pending oscillators. Optionally keep click bus unmuted (during resync). */
+  private clearPending(restoreClick: boolean): void {
     if (this.master && this.ctx) {
       const now = this.ctx.currentTime;
       this.master.gain.cancelScheduledValues(now);
@@ -536,7 +428,9 @@ export class Metronome {
       }
     }
     this.pendingOsc = [];
-    if (this.playing && this.enabled) this.restoreClickGain();
+    if (restoreClick && this.playing && this.enabled) {
+      this.setClickAudible(true);
+    }
   }
 
   private tick(): void {
@@ -547,32 +441,16 @@ export class Metronome {
     const beatSec = this.beatDurationSec();
     if (!(beatSec > 0)) return;
 
-    // Re-anchor only on large jumps (seek / stall). Small currentTime quanta
-    // must not clear pending oscillators — that was the severe click desync.
-    const reported = this.getMediaTime();
-    if (this.anchored) {
-      const est = this.estimatedMediaTime();
-      if (Math.abs(reported - est) > this.driftResyncSec) {
-        this.clearPending();
-        this.scheduledBeats.clear();
-        this.captureAnchor();
-        this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
-      }
-    } else {
-      this.captureAnchor();
-      this.nextBeatIndex = this.beatIndexAt(this.estimatedMediaTime());
-    }
-
+    // Live media clock — heard track and playhead share this timebase.
+    const mediaNow = this.getMediaTime();
     const origin = this.grid.downbeatOffsetSec || 0;
     const bpb = this.beatsPerBar();
-    const mediaNow = this.estimatedMediaTime();
     const want = this.beatIndexAt(mediaNow);
-    if (this.nextBeatIndex < want - 1 || this.nextBeatIndex > want + 4) {
+    if (this.nextBeatIndex < want - 1 || this.nextBeatIndex > want + 8) {
       this.nextBeatIndex = want;
     }
     const until = mediaNow + this.scheduleHorizonSec;
-    const ctxHorizon =
-      ctx.currentTime + this.lookAheadSec + this.scheduleHorizonSec;
+    const ctxNow = ctx.currentTime;
 
     while (true) {
       const beatIndex = this.nextBeatIndex;
@@ -583,9 +461,9 @@ export class Metronome {
         if (this.nextBeatIndex > 1e7) break;
         continue;
       }
-      const when = this.mediaToCtx(tAbs);
-      // Not yet in the schedule window — wait; do not skip the beat.
-      if (when > ctxHorizon) break;
+      // Map media-relative delay onto the click AudioContext clock.
+      const when = ctxNow + (tAbs - mediaNow);
+      if (when > ctxNow + this.scheduleHorizonSec + 0.05) break;
       const beatInBar = ((beatIndex % bpb) + bpb) % bpb;
       this.scheduleClick(when, beatInBar === 0, beatIndex);
       this.nextBeatIndex += 1;
@@ -603,7 +481,6 @@ export class Metronome {
     if (!ctx || !master) return;
 
     if (this.scheduledBeats.has(beatIndex)) return;
-    // Skip clicks that would fire in the past (avoid late "catch-up" blips).
     if (when < ctx.currentTime - 0.002) return;
 
     this.scheduledBeats.add(beatIndex);

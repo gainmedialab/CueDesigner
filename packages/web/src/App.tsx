@@ -123,6 +123,8 @@ export function App() {
   const transportGenRef = useRef(0);
   /** Desired transport state — true while playing or an async play() is in flight. */
   const wantPlayingRef = useRef(false);
+  /** Mirrors transport for the RAF clock so the playhead moves before React commits. */
+  const playingRef = useRef(false);
   /** After zoom, restore scroll so this time stays under cursorX in the scrollport. */
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
@@ -170,9 +172,8 @@ export function App() {
     setTcOffsetDraft(null);
   }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
-  // Audio element + metronome lifecycle. MediaElementSource is wired lazily on
-  // first play (user gesture) so we never leave a suspended AudioContext
-  // hooked to the element at mount — that caused mute/glitch on resume.
+  // Audio element + click metronome. Track audio uses native HTMLMediaElement
+  // output (no MediaElementSource) so Pause→Play cannot mute the graph.
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "auto";
@@ -183,21 +184,18 @@ export function App() {
     metronome.attachMediaElement(audio);
     const onEnded = () => {
       wantPlayingRef.current = false;
+      playingRef.current = false;
       transportGenRef.current += 1;
       metronomeRef.current?.setPlaying(false);
       setPlaying(false);
     };
-    // Seek + play-settled: re-anchor media↔ctx and drop stale click schedules.
     const onSeeked = () => metronomeRef.current?.lockToMediaClock();
-    const onPlaying = () => metronomeRef.current?.lockToMediaClock();
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("seeked", onSeeked);
-    audio.addEventListener("playing", onPlaying);
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("seeked", onSeeked);
-      audio.removeEventListener("playing", onPlaying);
       audioRef.current = null;
       metronome.dispose();
       metronomeRef.current = null;
@@ -258,22 +256,22 @@ export function App() {
     return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
-  // RAF clock while playing
+  // RAF clock driven by playingRef so the playhead advances from the first
+  // frame after audio.play() — not one React commit later (that hitch was
+  // visible as a sticky/jumpy timer right after Play / Pause→Play).
   useEffect(() => {
     const tick = () => {
       const audio = audioRef.current;
-      if (audio && playing) {
+      if (audio && playingRef.current) {
         setCurrentTime(audio.currentTime);
-        rafRef.current = requestAnimationFrame(tick);
       }
-    };
-    if (playing) {
       rafRef.current = requestAnimationFrame(tick);
-    }
+    };
+    rafRef.current = requestAnimationFrame(tick);
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, [playing]);
+  }, []);
 
   // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
   // Manual scroll suspends follow (checkbox stays on); programmatic scrolls are ignored.
@@ -454,11 +452,13 @@ export function App() {
     const audio = audioRef.current;
     if (!audio || !mediaUrl) return;
     // Treat in-flight play as "playing" so a second Space/Play pauses cleanly.
-    if (playing || wantPlayingRef.current) {
+    if (playingRef.current || wantPlayingRef.current) {
       wantPlayingRef.current = false;
+      playingRef.current = false;
       transportGenRef.current += 1;
       metronomeRef.current?.setPlaying(false);
       audio.pause();
+      setCurrentTime(audio.currentTime);
       setPlaying(false);
       return;
     }
@@ -467,32 +467,34 @@ export function App() {
     wantPlayingRef.current = true;
     const gen = ++transportGenRef.current;
     try {
-      // Build/resume shared graph under this gesture *before* play.
+      // Resume click AudioContext under this gesture (does not route media).
       await metronomeRef.current?.resume();
-      if (gen !== transportGenRef.current) return;
-      // Unmute media path first; do NOT arm the click scheduler yet — anchoring
-      // while currentTime is still frozen (pre-play) makes clicks lead audio
-      // after every Pause→Play.
-      metronomeRef.current?.primeMediaOutput();
+      if (gen !== transportGenRef.current) {
+        wantPlayingRef.current = false;
+        return;
+      }
       await audio.play();
       if (gen !== transportGenRef.current) {
+        wantPlayingRef.current = false;
         audio.pause();
         metronomeRef.current?.setPlaying(false);
         return;
       }
-      // Media is running: start scheduler and hard-lock media↔ctx (clears stale).
+      // Media is audible immediately (native element). Arm playhead + click now.
+      playingRef.current = true;
+      setCurrentTime(audio.currentTime);
       metronomeRef.current?.setPlaying(true);
       metronomeRef.current?.lockToMediaClock();
-      // React effect is idempotent (already playing on metronome).
       setPlaying(true);
     } catch (err) {
       if (gen !== transportGenRef.current) return;
       wantPlayingRef.current = false;
+      playingRef.current = false;
       metronomeRef.current?.setPlaying(false);
       setPlaying(false);
       setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [mediaUrl, playing]);
+  }, [mediaUrl]);
 
   const togglePlayRef = useRef(togglePlay);
   togglePlayRef.current = togglePlay;
