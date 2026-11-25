@@ -285,6 +285,48 @@ const CLICK_URI_HIGH = pcmToDataUri(synthesizeClickPcm(CLICK_SR, 1600, 1), CLICK
 const CLICK_URI_LOW = pcmToDataUri(synthesizeClickPcm(CLICK_SR, 1000, 0.9), CLICK_SR);
 
 /**
+ * Estimate file-relative downbeat from the first strong onset in the PCM.
+ * Returns 0 when the first hit is already near t=0 (no silent pickup).
+ */
+export function estimateDownbeatOffsetSec(
+  wave: WaveformData,
+  opts?: { maxSearchSec?: number; bpm?: number },
+): number {
+  const { channel, sampleRate } = wave;
+  if (!channel.length || !(sampleRate > 0)) return 0;
+  const maxSearchSec = opts?.maxSearchSec ?? 2.5;
+  const bpm = opts?.bpm && opts.bpm > 0 ? opts.bpm : 120;
+  // Search at most ~2 bars so we don't latch onto a mid-phrase hit.
+  const searchSec = Math.min(maxSearchSec, (60 / bpm) * 8);
+  const n = Math.min(channel.length, Math.floor(searchSec * sampleRate));
+  if (n < sampleRate * 0.02) return 0;
+
+  // Envelope: max abs in ~4ms windows.
+  const win = Math.max(1, Math.floor(sampleRate * 0.004));
+  let globalMax = 0;
+  for (let i = 0; i < n; i++) {
+    const a = Math.abs(channel[i]!);
+    if (a > globalMax) globalMax = a;
+  }
+  if (!(globalMax > 1e-4)) return 0;
+  const thresh = globalMax * 0.35;
+
+  for (let i = 0; i + win < n; i += win) {
+    let peak = 0;
+    for (let j = i; j < i + win; j++) {
+      const a = Math.abs(channel[j]!);
+      if (a > peak) peak = a;
+    }
+    if (peak >= thresh) {
+      const t = i / sampleRate;
+      // Near-zero onset → grid origin already fine.
+      return t < 0.02 ? 0 : Math.round(t * 1000) / 1000;
+    }
+  }
+  return 0;
+}
+
+/**
  * Schedules short clicks on the musical beat grid while media plays.
  *
  * Media stays on native HTMLMediaElement (no MES).
@@ -296,9 +338,11 @@ const CLICK_URI_LOW = pcmToDataUri(synthesizeClickPcm(CLICK_SR, 1000, 0.9), CLIC
  * skip the beat if the pool is busy. One-time muted unlock under Play/Click
  * gesture via `resume()` / `auditionSync()` (must not gate media.play()).
  *
- * Sync: look-ahead from live media `currentTime`, fire `play()` early by
- * `clickLeadSec` so HTMLAudio start latency lands the tick on the beat
- * (not trailing the playhead / track).
+ * Sync (two latency terms, look-ahead from live media `currentTime`):
+ * - `clickStartLeadSec` — fire HTMLAudio.play() early for click-element start delay
+ * - `mediaEarLagSec` — heard media lags `currentTime` / playhead
+ * Net lead = clickStart − mediaEar so the *heard* click meets the *heard* beat,
+ * not only the visual playhead.
  */
 export class Metronome {
   private poolHigh: HTMLAudioElement[] = [];
@@ -323,14 +367,20 @@ export class Metronome {
   private getMediaTime: () => number = () => 0;
   private scheduledBeats = new Set<number>();
   private readonly scheduleHorizonSec = 0.28;
+  /** HTMLAudioElement.play() → audible tick (start latency). */
+  private readonly clickStartLeadSec = 0.08;
   /**
-   * How early to call HTMLAudio.play() before beat media time so the tick
-   * is heard on the grid (HTMLAudio start latency). Fixed — probing an
-   * AudioContext on Play hitching the clock in testing.
+   * How far heard media lags `currentTime`/playhead. Full click-only lead
+   * lined ticks up with the playhead but put them ahead of heard music.
    */
-  private readonly clickLeadSec = 0.08;
+  private readonly mediaEarLagSec = 0.05;
   /** Diagnostics: successful element.play() attempts. */
   clicksStarted = 0;
+
+  /** Net: fire play() this far before beat media time. */
+  private netLeadSec(): number {
+    return Math.max(0, this.clickStartLeadSec - this.mediaEarLagSec);
+  }
 
   setEnabled(on: boolean): void {
     const was = this.enabled;
@@ -537,7 +587,7 @@ export class Metronome {
 
     const origin = this.grid.downbeatOffsetSec || 0;
     const bpb = this.beatsPerBar();
-    const lead = this.clickLeadSec;
+    const lead = this.netLeadSec();
     const want = this.beatIndexAt(mediaNow);
     if (this.nextBeatIndex < want - 1 || this.nextBeatIndex > want + 4) {
       this.nextBeatIndex = want;
@@ -549,8 +599,9 @@ export class Metronome {
       const beatIndex = this.nextBeatIndex;
       const tAbs = origin + beatIndex * beatSec;
       if (tAbs > until) break;
-      // Too late to hear on the beat (past beat + small grace).
-      if (tAbs < 0 || tAbs < mediaNow - 0.02) {
+      // Missed window (past beat) — do not skip beats that are still inside
+      // the lead arming window (first beat when Play starts slightly late).
+      if (tAbs < 0 || mediaNow > tAbs + 0.045) {
         this.nextBeatIndex += 1;
         if (this.nextBeatIndex > 1e7) break;
         continue;
@@ -560,7 +611,7 @@ export class Metronome {
         continue;
       }
       const beatInBar = ((beatIndex % bpb) + bpb) % bpb;
-      // Fire play() early by `lead` so sound arrives near tAbs.
+      // Fire play() early by net lead so heard click meets heard media beat.
       const fireAtMedia = tAbs - lead;
       const delayMs = Math.max(0, (fireAtMedia - mediaNow) * 1000);
       this.scheduleElementClick(delayMs, beatInBar === 0, beatIndex, tAbs);
@@ -609,10 +660,10 @@ export class Metronome {
     if (!this.enabled || !this.playing) return;
     const mediaNow = this.getMediaTime();
     if (!Number.isFinite(mediaNow)) return;
-    const lead = this.clickLeadSec;
+    const lead = this.netLeadSec();
     const fireAt = tAbs - lead;
     // Missed the window — don't stack late ticks behind the playhead.
-    if (mediaNow > tAbs + 0.04) return;
+    if (mediaNow > tAbs + 0.045) return;
     if (mediaNow < fireAt - 0.01) {
       const waitMs = Math.max(4, (fireAt - mediaNow) * 1000);
       const epoch = this.schedulerEpoch;

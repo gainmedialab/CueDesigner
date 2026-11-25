@@ -56,6 +56,7 @@ import {
 import {
   Metronome,
   drawWaveform,
+  estimateDownbeatOffsetSec,
   loadAudioFile,
   loadWaveformData,
   type WaveformData,
@@ -286,6 +287,21 @@ export function App() {
 
   const duration = project.media?.durationSec ?? 0;
   const zoom = clampTimelineZoom(project.settings.timelineZoom);
+
+  // If Downbeat is still 0, nudge it to the first strong onset (silent pickup).
+  // Skips when onset is already ~t=0 so an on-grid file stays put.
+  useEffect(() => {
+    if (!waveform) return;
+    if (project.settings.downbeatOffsetSec > 0) return;
+    const est = estimateDownbeatOffsetSec(waveform, {
+      bpm: project.settings.bpm,
+    });
+    if (!(est >= 0.02)) return;
+    setProject((p) => {
+      if (p.settings.downbeatOffsetSec > 0) return p;
+      return updateSettings(p, { downbeatOffsetSec: est });
+    });
+  }, [waveform, project.settings.bpm, project.settings.downbeatOffsetSec]);
 
   // Viewport waveform: peaks keyed to the same tAbs % as cues/grid/playhead.
   // Canvas covers only the visible lane slice so zoom keeps ~1 peak per device pixel.
