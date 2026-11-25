@@ -50,7 +50,6 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type CSSProperties,
   type ChangeEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -75,8 +74,6 @@ const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
 const TRACK_LABEL_W = 100;
 const ZOOM_STEP = 1.25;
-/** Keep playhead this fraction into the visible lane while following. */
-const FOLLOW_VIEW_FRAC = 0.35;
 
 /** Snap unless Alt/Option is held, or project snap is disabled. */
 function applySnap(
@@ -119,27 +116,9 @@ export function App() {
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
-  const tracksRef = useRef<HTMLDivElement>(null);
-  const clockNowRef = useRef<HTMLSpanElement>(null);
-  const scrubRef = useRef<HTMLInputElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
   const metronomeRef = useRef<Metronome | null>(null);
-  /** Invalidates in-flight play() when Play is pressed again / paused mid-start. */
-  const transportGenRef = useRef(0);
-  /** Desired transport state — true while playing or an async play() is in flight. */
-  const wantPlayingRef = useRef(false);
-  /** Mirrors transport for the RAF clock so the playhead moves before React commits. */
-  const playingRef = useRef(false);
-  /** Latest media time — RAF owns this while playing; React state is throttled. */
-  const currentTimeRef = useRef(0);
-  const lastReactTimePushMsRef = useRef(0);
-  const lastWaveScrollSyncMsRef = useRef(0);
-  const lastClockLabelRef = useRef("");
-  const durationRef = useRef(0);
-  const timeModeRef = useRef<TimeDisplayMode>(timeMode);
-  const projectSettingsRef = useRef(project.settings);
-  const followActiveRef = useRef(false);
   /** After zoom, restore scroll so this time stays under cursorX in the scrollport. */
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
@@ -148,17 +127,10 @@ export function App() {
   const suppressScrollFollowPauseRef = useRef(false);
   const followPlayheadRef = useRef(followPlayhead);
   followPlayheadRef.current = followPlayhead;
-  /** Latest zoom for keyboard shortcuts (avoids stale closure on key repeat). */
-  const zoomRef = useRef(1);
   /** Current session media bytes (for save embed + IndexedDB). */
   const mediaBlobRef = useRef<Blob | null>(null);
   const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
   const [scrollPortW, setScrollPortW] = useState(0);
-
-  const followActive = followPlayhead && !followSuspended;
-  followActiveRef.current = followActive;
-  timeModeRef.current = timeMode;
-  projectSettingsRef.current = project.settings;
 
   const setScrollLeftProgrammatic = useCallback((left: number) => {
     const el = timelineScrollRef.current;
@@ -190,8 +162,7 @@ export function App() {
     setTcOffsetDraft(null);
   }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
-  // Audio element + click metronome. Track audio uses native HTMLMediaElement
-  // output (no MediaElementSource) so Pause→Play cannot mute the graph.
+  // Audio element + click metronome. Media uses native HTMLMediaElement (no MES).
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "auto";
@@ -200,14 +171,8 @@ export function App() {
     metronomeRef.current = metronome;
     metronome.setMediaTimeGetter(() => audioRef.current?.currentTime ?? 0);
     metronome.attachMediaElement(audio);
-    const onEnded = () => {
-      wantPlayingRef.current = false;
-      playingRef.current = false;
-      transportGenRef.current += 1;
-      metronomeRef.current?.setPlaying(false);
-      setPlaying(false);
-    };
-    const onSeeked = () => metronomeRef.current?.lockToMediaClock();
+    const onEnded = () => setPlaying(false);
+    const onSeeked = () => metronomeRef.current?.resync();
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("seeked", onSeeked);
     return () => {
@@ -274,82 +239,22 @@ export function App() {
     return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
-  // RAF clock: sample audio.currentTime and update playhead/clock via DOM.
-  // Do NOT setState every frame — that re-rendered the whole App + Follow
-  // useLayoutEffect scrolled + redrew the waveform ~60×/s (visible stutter
-  // on playhead, timer, and click setTimeouts starving on the main thread).
+  // RAF clock while playing
   useEffect(() => {
-    const applyFollowScroll = (t: number, dur: number) => {
-      if (!followActiveRef.current) return;
-      const zoomNow = zoomRef.current;
-      if (!(zoomNow > 1) || !(dur > 0)) return;
-      const el = timelineScrollRef.current;
-      if (!el) return;
-      const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
-      const playheadLaneX = (timeToLanePercent(t, dur) / 100) * laneW;
-      const viewLaneW = Math.max(1, el.clientWidth - TRACK_LABEL_W);
-      const targetViewX = viewLaneW * FOLLOW_VIEW_FRAC;
-      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
-      const next = Math.max(
-        0,
-        Math.min(maxScroll, playheadLaneX - targetViewX),
-      );
-      if (Math.abs(el.scrollLeft - next) < 0.5) return;
-      // Keep suppress latched while we follow — avoid per-frame rAF churn.
-      suppressScrollFollowPauseRef.current = true;
-      el.scrollLeft = next;
-      const now = performance.now();
-      // Waveform scroll sync is cheap to skip most frames while following.
-      if (now - lastWaveScrollSyncMsRef.current > 120) {
-        lastWaveScrollSyncMsRef.current = now;
-        setTimelineScrollLeft(el.scrollLeft);
-      }
-    };
-
-    const pushDisplay = (t: number, dur: number, forceReact: boolean) => {
-      currentTimeRef.current = t;
-      const pct = `${timeToLanePercent(t, dur)}%`;
-      const tracks = tracksRef.current;
-      if (tracks) tracks.style.setProperty("--playhead-pct", pct);
-
-      const label = formatTime(t, timeModeRef.current, projectSettingsRef.current);
-      if (label !== lastClockLabelRef.current) {
-        lastClockLabelRef.current = label;
-        const clockEl = clockNowRef.current;
-        if (clockEl) clockEl.textContent = label;
-      }
-
-      const scrub = scrubRef.current;
-      if (scrub) {
-        const max = Number(scrub.max) || 1;
-        scrub.value = String(Math.min(t, max));
-      }
-
-      applyFollowScroll(t, dur);
-
-      const now = performance.now();
-      if (
-        forceReact ||
-        now - lastReactTimePushMsRef.current > 100
-      ) {
-        lastReactTimePushMsRef.current = now;
-        setCurrentTime(t);
-      }
-    };
-
     const tick = () => {
       const audio = audioRef.current;
-      if (audio && playingRef.current) {
-        const dur = durationRef.current || audio.duration || 0;
-        pushDisplay(audio.currentTime, dur, false);
+      if (audio && playing) {
+        setCurrentTime(audio.currentTime);
+        rafRef.current = requestAnimationFrame(tick);
       }
-      rafRef.current = requestAnimationFrame(tick);
     };
-    rafRef.current = requestAnimationFrame(tick);
+    if (playing) {
+      rafRef.current = requestAnimationFrame(tick);
+    }
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, []);
+  }, [playing]);
 
   // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
   // Manual scroll suspends follow (checkbox stays on); programmatic scrolls are ignored.
@@ -380,9 +285,7 @@ export function App() {
   }, []);
 
   const duration = project.media?.durationSec ?? 0;
-  durationRef.current = duration;
   const zoom = clampTimelineZoom(project.settings.timelineZoom);
-  zoomRef.current = zoom;
 
   // Viewport waveform: peaks keyed to the same tAbs % as cues/grid/playhead.
   // Canvas covers only the visible lane slice so zoom keeps ~1 peak per device pixel.
@@ -434,8 +337,9 @@ export function App() {
     );
   }, [zoom, duration, setScrollLeftProgrammatic]);
 
-  // Follow-while-playing is handled inside the RAF clock (direct scrollLeft).
-  // A useLayoutEffect on currentTime caused per-frame React+waveform thrash.
+  // Follow auto-scroll during play intentionally omitted in this baseline
+  // restore (pre-shortcut). The currentTime→useLayoutEffect follow path from
+  // 35c6e11 caused per-frame React/waveform thrash. Checkbox still latches.
 
   const applyTimelineZoom = useCallback(
     (nextZoom: number, anchor: { t: number; cursorX: number } | null) => {
@@ -495,160 +399,36 @@ export function App() {
     return () => el.removeEventListener("wheel", onWheel);
   }, [applyTimelineZoom, duration, zoom]);
 
-  const paintTransportTime = useCallback((t: number, dur: number) => {
-    currentTimeRef.current = t;
-    const pct = `${timeToLanePercent(t, dur)}%`;
-    tracksRef.current?.style.setProperty("--playhead-pct", pct);
-    const label = formatTime(t, timeModeRef.current, projectSettingsRef.current);
-    lastClockLabelRef.current = label;
-    if (clockNowRef.current) clockNowRef.current.textContent = label;
-    const scrub = scrubRef.current;
-    if (scrub) {
-      const max = Number(scrub.max) || 1;
-      scrub.value = String(Math.min(t, max));
-    }
-  }, []);
-
   const seek = useCallback((t: number) => {
     const audio = audioRef.current;
     const clamped = Math.max(0, Math.min(t, audio?.duration || duration || 0));
     if (audio) audio.currentTime = clamped;
-    paintTransportTime(clamped, duration);
     setCurrentTime(clamped);
-    lastReactTimePushMsRef.current = performance.now();
-    // Seek only — never re-anchor on plain Play (that caused trail/snap).
-    metronomeRef.current?.lockToMediaClock();
-  }, [duration, paintTransportTime]);
+    // Immediate resync (seeked also fires); keeps click locked across scrub.
+    metronomeRef.current?.resync();
+  }, [duration]);
 
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !mediaUrl) return;
-    // Treat in-flight play as "playing" so a second Space/Play pauses cleanly.
-    if (playingRef.current || wantPlayingRef.current) {
-      wantPlayingRef.current = false;
-      playingRef.current = false;
-      transportGenRef.current += 1;
-      metronomeRef.current?.setPlaying(false);
+    if (playing) {
       audio.pause();
-      const t = audio.currentTime;
-      paintTransportTime(t, durationRef.current || audio.duration || 0);
-      setCurrentTime(t);
-      lastReactTimePushMsRef.current = performance.now();
-      suppressScrollFollowPauseRef.current = false;
       setPlaying(false);
-      return;
-    }
-    // Clear scroll suspension; checkbox preference stays latched.
-    setFollowSuspended(false);
-    wantPlayingRef.current = true;
-    const gen = ++transportGenRef.current;
-    try {
-      // Sync click under THIS gesture (no await — awaiting unlock before
-      // audio.play() was the Play hitch from ca48145 / 323fc58).
-      if (metronomeRef.current?.isEnabled()) {
-        metronomeRef.current.auditionSync();
-      } else {
+    } else {
+      // Clear scroll suspension; checkbox preference stays latched.
+      setFollowSuspended(false);
+      try {
+        // Start media immediately (native element). Click AudioContext resume
+        // is non-blocking — never await click priming before audio.play().
+        const playP = audio.play();
         void metronomeRef.current?.resume();
+        await playP;
+        setPlaying(true);
+      } catch (err) {
+        setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-      // Start media immediately — do not await click priming first.
-      await audio.play();
-      if (gen !== transportGenRef.current) {
-        wantPlayingRef.current = false;
-        audio.pause();
-        metronomeRef.current?.setPlaying(false);
-        return;
-      }
-      // Arm RAF before React commit; paint DOM playhead/clock immediately.
-      playingRef.current = true;
-      const t = audio.currentTime;
-      paintTransportTime(t, durationRef.current || audio.duration || 0);
-      setCurrentTime(t);
-      lastReactTimePushMsRef.current = performance.now();
-      // Start click scheduler after media is running; no lockToMediaClock here.
-      metronomeRef.current?.setPlaying(true);
-      setPlaying(true);
-    } catch (err) {
-      if (gen !== transportGenRef.current) return;
-      wantPlayingRef.current = false;
-      playingRef.current = false;
-      metronomeRef.current?.setPlaying(false);
-      setPlaying(false);
-      setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [mediaUrl, paintTransportTime]);
-
-  const togglePlayRef = useRef(togglePlay);
-  togglePlayRef.current = togglePlay;
-  const zoomAroundPlayheadRef = useRef(zoomAroundPlayhead);
-  zoomAroundPlayheadRef.current = zoomAroundPlayhead;
-
-  // Global transport / timeline shortcuts — ignored while typing in fields.
-  useEffect(() => {
-    const isTypingTarget = (el: EventTarget | null) => {
-      if (!(el instanceof HTMLElement)) return false;
-      if (el.isContentEditable) return true;
-      const tag = el.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
-      return Boolean(
-        el.closest("input, textarea, select, [contenteditable='true']"),
-      );
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
-      if (isTypingTarget(e.target)) return;
-      // Leave browser / OS chords alone (Find, etc.).
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-
-      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-
-      if (key === " " || e.code === "Space") {
-        if (e.repeat) return;
-        e.preventDefault();
-        void togglePlayRef.current();
-        return;
-      }
-      if (key === "f") {
-        if (e.repeat) return;
-        e.preventDefault();
-        setFollowPlayhead((on) => {
-          const next = !on;
-          if (next) setFollowSuspended(false);
-          return next;
-        });
-        return;
-      }
-      if (key === "c") {
-        if (e.repeat) return;
-        e.preventDefault();
-        setProject((p) => {
-          const next = !p.settings.metronomeEnabled;
-          metronomeRef.current?.setEnabled(next);
-          // Sync audition under this key gesture (no await — keeps autoplay).
-          if (next) {
-            metronomeRef.current?.auditionSync();
-          }
-          return updateSettings(p, { metronomeEnabled: next });
-        });
-        return;
-      }
-      if (key === "g") {
-        if (e.repeat) return;
-        e.preventDefault();
-        zoomAroundPlayheadRef.current(zoomRef.current / ZOOM_STEP);
-        return;
-      }
-      if (key === "h") {
-        if (e.repeat) return;
-        e.preventDefault();
-        zoomAroundPlayheadRef.current(zoomRef.current * ZOOM_STEP);
-        return;
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [mediaUrl, playing]);
 
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
@@ -1085,11 +865,7 @@ export function App() {
           ))}
         </div>
         <div className="clock-block">
-          <span
-            ref={clockNowRef}
-            className="clock"
-            title={timeDisplayModeLabel(timeMode)}
-          >
+          <span className="clock" title={timeDisplayModeLabel(timeMode)}>
             {clockNow}
           </span>
           <span className="clock-mode-label">
@@ -1097,7 +873,6 @@ export function App() {
           </span>
         </div>
         <input
-          ref={scrubRef}
           className="scrub"
           type="range"
           min={0}
@@ -1135,7 +910,6 @@ export function App() {
             aria-label="BPM"
             onChange={(e) => {
               const v = e.target.value;
-              // Allow empty / partial digits while editing; commit on blur/Enter.
               if (v !== "" && !/^\d+$/.test(v)) return;
               setBpmDraft(v);
             }}
@@ -1286,17 +1060,11 @@ export function App() {
           <input
             type="checkbox"
             checked={project.settings.metronomeEnabled}
-            onChange={(e) => {
-              const on = e.target.checked;
-              // Apply immediately so Play in the same turn already sees Click on.
-              metronomeRef.current?.setEnabled(on);
-              if (on) {
-                metronomeRef.current?.auditionSync();
-              }
+            onChange={(e) =>
               setProject((p) =>
-                updateSettings(p, { metronomeEnabled: on }),
-              );
-            }}
+                updateSettings(p, { metronomeEnabled: e.target.checked }),
+              )
+            }
             title="Click on the BPM beat grid while playing (accent on downbeat)"
           />
           Click
@@ -1313,13 +1081,13 @@ export function App() {
             disabled={!project.settings.metronomeEnabled}
             title="Metronome click volume"
             aria-label="Metronome volume"
-            onChange={(e) => {
-              const vol = Number(e.target.value);
-              metronomeRef.current?.setVolume(vol);
+            onChange={(e) =>
               setProject((p) =>
-                updateSettings(p, { metronomeVolume: vol }),
-              );
-            }}
+                updateSettings(p, {
+                  metronomeVolume: Number(e.target.value),
+                }),
+              )
+            }
           />
         </label>
         <div className="grid-field zoom-field" aria-label="Timeline zoom">
@@ -1360,12 +1128,12 @@ export function App() {
           className={`grid-field follow-field${followSuspended && followPlayhead ? " suspended" : ""}`}
           title={
             zoom <= 1
-              ? "Follow playhead (active when zoomed in)"
+              ? "Follow playhead (keep preference; auto-scroll deferred)"
               : !followPlayhead
                 ? "Follow off — check to enable"
                 : followSuspended
-                  ? "Follow paused by scroll — Play resumes (checkbox stays on)"
-                  : "Following playhead — scroll to pause temporarily"
+                  ? "Follow preference paused by scroll — Play clears suspension"
+                  : "Follow preference on (auto-scroll during play deferred)"
           }
         >
           <input
@@ -1532,15 +1300,7 @@ export function App() {
                   })}
                 </div>
               </div>
-              <div
-                ref={tracksRef}
-                className="tracks"
-                style={
-                  {
-                    ["--playhead-pct"]: `${playheadPct}%`,
-                  } as CSSProperties
-                }
-              >
+              <div className="tracks">
                 {project.departments.map((d, idx) => (
                   <div className="track" key={d.id}>
                     <div className="track-label">
@@ -1580,7 +1340,10 @@ export function App() {
                             />
                           );
                         })}
-                      <div className="playhead" />
+                      <div
+                        className="playhead"
+                        style={{ left: `${playheadPct}%` }}
+                      />
                     </div>
                   </div>
                 ))}
