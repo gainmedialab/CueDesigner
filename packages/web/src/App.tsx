@@ -430,6 +430,56 @@ export function App() {
     }
   }, [mediaUrl, playing]);
 
+  // Space / F / G / H — same paths as transport / grid-bar controls.
+  // Does not touch Click scheduling, MES, or lockToMediaClock.
+  useEffect(() => {
+    const isTypingTarget = (el: EventTarget | null): boolean => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (el.isContentEditable) return true;
+      return Boolean(el.closest("input, textarea, select, [contenteditable=true]"));
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.repeat) return;
+      if (isTypingTarget(e.target)) return;
+
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (key === " " || key === "Spacebar") {
+        e.preventDefault();
+        void togglePlay();
+        return;
+      }
+      if (key === "f") {
+        e.preventDefault();
+        setFollowPlayhead((prev) => {
+          const next = !prev;
+          if (next) setFollowSuspended(false);
+          return next;
+        });
+        return;
+      }
+      if (key === "g") {
+        e.preventDefault();
+        setProject((p) =>
+          updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
+        );
+        return;
+      }
+      if (key === "h") {
+        // Home to start — same as transport ⇤. Prior phase note had H=zoom-in
+        // paired with G=zoom-out; this task remaps G to magnetic snap.
+        e.preventDefault();
+        seek(0);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [seek, togglePlay]);
+
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
     setMediaUrl(null);
@@ -1156,7 +1206,9 @@ export function App() {
         </label>
         <span className="grid-hint">
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
-          <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor
+          <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
+          <kbd>Space</kbd> play/pause · <kbd>F</kbd> follow ·{" "}
+          <kbd>G</kbd> snap · <kbd>H</kbd> home
         </span>
       </div>
 

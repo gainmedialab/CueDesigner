@@ -83,6 +83,15 @@ Use the **BPM bar** under transport:
 
 **Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`, `timelineZoom`, `metronomeEnabled`, `metronomeVolume`, `fps`, `showTcOffsetSec`).
 
+**Keyboard shortcuts** (ignored while typing in inputs; no Ctrl/⌘/Alt chords):
+
+| Key | Action |
+|-----|--------|
+| **Space** | Play / pause (same path as the transport button) |
+| **F** | Toggle Follow playhead (clears scroll suspension when turning on) |
+| **G** | Toggle Magnetic snap |
+| **H** | Home — seek playhead to start (same as transport ⇤) |
+
 **Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). The **Follow** checkbox latches across play/pause (auto-scroll-during-play is deferred until transport baseline is re-confirmed). Manual scroll temporarily suspends follow (checkbox stays on; **Play** or re-check clears suspension). The waveform redraws for the visible span at device-pixel density, keyed to the same file-relative `tAbs` as the playhead, cues, and grid. Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 
 ## Time display modes (Phase 1)
