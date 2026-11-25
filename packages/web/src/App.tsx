@@ -106,8 +106,10 @@ export function App() {
   const [tcOffsetDraft, setTcOffsetDraft] = useState<string | null>(null);
   /** Scrollport scrollLeft — drives viewport waveform redraw. */
   const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
-  /** Auto-scroll timeline to keep playhead in view while playing (when zoomed). */
+  /** User Follow preference — only the checkbox toggles this (latches across play/pause). */
   const [followPlayhead, setFollowPlayhead] = useState(true);
+  /** Temporary pause after manual scroll; cleared on Play or re-checking Follow. */
+  const [followSuspended, setFollowSuspended] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
@@ -121,7 +123,7 @@ export function App() {
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
   );
-  /** Ignore programmatic scrollLeft when deciding to pause follow. */
+  /** Ignore programmatic scrollLeft when deciding to suspend follow. */
   const suppressScrollFollowPauseRef = useRef(false);
   const followPlayheadRef = useRef(followPlayhead);
   followPlayheadRef.current = followPlayhead;
@@ -130,13 +132,20 @@ export function App() {
   const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
   const [scrollPortW, setScrollPortW] = useState(0);
 
+  const followActive = followPlayhead && !followSuspended;
+
   const setScrollLeftProgrammatic = useCallback((left: number) => {
     const el = timelineScrollRef.current;
     if (!el) return;
     suppressScrollFollowPauseRef.current = true;
     el.scrollLeft = left;
     setTimelineScrollLeft(el.scrollLeft);
-    suppressScrollFollowPauseRef.current = false;
+    // Hold suppress across deferred scroll events (some engines fire async).
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        suppressScrollFollowPauseRef.current = false;
+      });
+    });
   }, []);
 
   // Keep active department valid
@@ -250,7 +259,7 @@ export function App() {
   }, [playing]);
 
   // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
-  // Manual scroll pauses playhead follow; programmatic scrolls are suppressed.
+  // Manual scroll suspends follow (checkbox stays on); programmatic scrolls are ignored.
   useEffect(() => {
     const el = timelineScrollRef.current;
     if (!el) return;
@@ -265,7 +274,7 @@ export function App() {
         !suppressScrollFollowPauseRef.current &&
         followPlayheadRef.current
       ) {
-        setFollowPlayhead(false);
+        setFollowSuspended(true);
       }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
@@ -332,7 +341,7 @@ export function App() {
 
   // While playing with follow on and zoomed, keep the playhead in the viewport.
   useLayoutEffect(() => {
-    if (!playing || !followPlayhead || zoom <= 1 || !(duration > 0)) return;
+    if (!playing || !followActive || zoom <= 1 || !(duration > 0)) return;
     const el = timelineScrollRef.current;
     if (!el) return;
     const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
@@ -349,7 +358,7 @@ export function App() {
     setScrollLeftProgrammatic(next);
   }, [
     playing,
-    followPlayhead,
+    followActive,
     zoom,
     duration,
     currentTime,
@@ -393,6 +402,9 @@ export function App() {
       if (!(e.ctrlKey || e.metaKey)) {
         if (zoom > 1 && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
           e.preventDefault();
+          // Explicit user pan — suspend follow even if a programmatic scroll
+          // still holds the suppress flag from the prior frame.
+          if (followPlayheadRef.current) setFollowSuspended(true);
           el.scrollLeft += e.deltaY;
         }
         return;
@@ -427,8 +439,8 @@ export function App() {
       audio.pause();
       setPlaying(false);
     } else {
-      // Resume follow when starting playback (manual scroll pauses it).
-      setFollowPlayhead(true);
+      // Clear scroll suspension; checkbox preference stays latched.
+      setFollowSuspended(false);
       try {
         // Resume shared AudioContext before play — MediaElementSource is mute while suspended.
         await metronomeRef.current?.resume();
@@ -1120,23 +1132,34 @@ export function App() {
           </span>
         </div>
         <label
-          className="grid-field follow-field"
+          className={`grid-field follow-field${followSuspended && followPlayhead ? " suspended" : ""}`}
           title={
             zoom <= 1
               ? "Follow playhead (active when zoomed in)"
-              : followPlayhead
-                ? "Following playhead — scroll to pause"
-                : "Follow paused — play or check to resume"
+              : !followPlayhead
+                ? "Follow off — check to enable"
+                : followSuspended
+                  ? "Follow paused by scroll — Play resumes (checkbox stays on)"
+                  : "Following playhead — scroll to pause temporarily"
           }
         >
           <input
             type="checkbox"
             checked={followPlayhead}
             disabled={zoom <= 1}
-            onChange={(e) => setFollowPlayhead(e.target.checked)}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setFollowPlayhead(on);
+              if (on) setFollowSuspended(false);
+            }}
             aria-label="Follow playhead"
           />
           Follow
+          {followSuspended && followPlayhead && zoom > 1 ? (
+            <span className="follow-paused-hint" aria-live="polite">
+              paused
+            </span>
+          ) : null}
         </label>
         <span className="grid-hint">
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}

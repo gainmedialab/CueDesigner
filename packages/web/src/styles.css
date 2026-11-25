@@ -301,6 +301,16 @@ input[type="color"] {
   accent-color: var(--accent);
 }
 
+.follow-field.suspended {
+  color: var(--text-muted);
+}
+
+.follow-paused-hint {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .grid-line {
   position: absolute;
   top: 0;
