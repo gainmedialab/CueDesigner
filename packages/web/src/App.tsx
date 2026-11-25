@@ -29,6 +29,15 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { buildPeaks, drawPeaks, loadAudioFile } from "./audio";
+import {
+  MEDIA_EMBED_MAX_BYTES,
+  blobToDataUrl,
+  dataUrlToBlob,
+  deleteProjectMedia,
+  formatBytes,
+  getProjectMedia,
+  putProjectMedia,
+} from "./mediaStore";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 
@@ -51,6 +60,9 @@ export function App() {
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
+  /** Current session media bytes (for save embed + IndexedDB). */
+  const mediaBlobRef = useRef<Blob | null>(null);
+  const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
 
   // Keep active department valid
   useEffect(() => {
@@ -137,45 +149,117 @@ export function App() {
     }
   }, [mediaUrl, playing]);
 
+  const clearPlaybackMedia = useCallback(() => {
+    if (mediaUrl) URL.revokeObjectURL(mediaUrl);
+    setMediaUrl(null);
+    setPeaks(null);
+    mediaBlobRef.current = null;
+    mediaMetaRef.current = null;
+  }, [mediaUrl]);
+
+  const applyMediaBlob = useCallback(
+    async (
+      blob: Blob,
+      meta: { name: string; mimeType: string },
+      projectId: string,
+      opts?: { persist?: boolean },
+    ) => {
+      if (mediaUrl) URL.revokeObjectURL(mediaUrl);
+      const objectUrl = URL.createObjectURL(blob);
+      mediaBlobRef.current = blob;
+      mediaMetaRef.current = meta;
+      setMediaUrl(objectUrl);
+      setPeaks(null);
+      if (opts?.persist !== false) {
+        try {
+          await putProjectMedia(projectId, blob, meta);
+        } catch {
+          // IndexedDB optional — in-memory + embed still work this session
+        }
+      }
+      buildPeaks(objectUrl)
+        .then(setPeaks)
+        .catch(() => undefined);
+      return objectUrl;
+    },
+    [mediaUrl],
+  );
+
   const onImportAudio = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
     try {
       setStatus(`Loading ${file.name}…`);
-      if (mediaUrl) URL.revokeObjectURL(mediaUrl);
       const loaded = await loadAudioFile(file);
-      setMediaUrl(loaded.objectUrl);
-      setPeaks(null);
+      URL.revokeObjectURL(loaded.objectUrl);
+      const mimeType = loaded.mimeType;
+      await applyMediaBlob(file, { name: loaded.name, mimeType }, project.id);
       setProject((p) =>
         setProjectMedia(p, {
           id: createId(),
           name: loaded.name,
-          mimeType: loaded.mimeType,
+          mimeType,
           durationSec: loaded.durationSec,
         }),
       );
       setCurrentTime(0);
       setPlaying(false);
-      setStatus(`Imported ${loaded.name} (${formatAbsoluteTime(loaded.durationSec)})`);
-      // Peaks async — non-blocking
-      buildPeaks(loaded.objectUrl)
-        .then(setPeaks)
-        .catch(() => setStatus((s) => `${s} (waveform unavailable)`));
+      setStatus(
+        `Imported ${loaded.name} (${formatAbsoluteTime(loaded.durationSec)}). Media cached offline in this browser.`,
+      );
     } catch (err) {
       setStatus(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
-  const onSaveProject = () => {
-    const blob = projectDownloadBlob(touchProject(project));
+  const onSaveProject = async () => {
+    const touched = touchProject(project);
+    let mediaDataUrl: string | undefined;
+    const blob = mediaBlobRef.current;
+    const meta = mediaMetaRef.current;
+
+    if (blob && meta) {
+      try {
+        await putProjectMedia(touched.id, blob, meta);
+      } catch {
+        // continue — download may still embed
+      }
+      if (blob.size <= MEDIA_EMBED_MAX_BYTES) {
+        try {
+          mediaDataUrl = await blobToDataUrl(blob);
+        } catch (err) {
+          setStatus(
+            `Save: could not embed media (${err instanceof Error ? err.message : String(err)}). Retry or re-import.`,
+          );
+          return;
+        }
+      }
+    }
+
+    const fileBlob = projectDownloadBlob(touched, mediaDataUrl);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${project.name.replace(/[^\w.-]+/g, "_") || "show"}.cueproj.json`;
+    a.href = URL.createObjectURL(fileBlob);
+    a.download = `${touched.name.replace(/[^\w.-]+/g, "_") || "show"}.cueproj.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-    setProject((p) => touchProject(p));
-    setStatus("Project saved (download). Offline — no network used.");
+    setProject(touched);
+
+    if (!project.media) {
+      setStatus("Project saved (download). Offline — no network used.");
+    } else if (mediaDataUrl) {
+      setStatus(
+        `Project saved with embedded media (${formatBytes(blob!.size)}). Offline — no network used.`,
+      );
+    } else if (blob) {
+      setStatus(
+        `Project saved. Media (${formatBytes(blob.size)}) kept in this browser (IndexedDB) — not embedded (limit ${formatBytes(MEDIA_EMBED_MAX_BYTES)}). Reopen here restores playback; elsewhere re-import if needed.`,
+      );
+    } else {
+      setStatus(
+        "Project saved without media bytes. Re-import audio if playback is missing after reopen.",
+      );
+    }
   };
 
   const onOpenProject = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -185,24 +269,45 @@ export function App() {
     try {
       const text = await file.text();
       const { project: loaded, mediaDataUrl } = deserializeProject(text);
-      if (mediaUrl) URL.revokeObjectURL(mediaUrl);
-      setProject(loaded);
       setSelectedCueId(null);
       setActiveDeptId(loaded.departments[0]?.id ?? "");
       setPlaying(false);
       setCurrentTime(0);
-      setPeaks(null);
+      setProject(loaded);
+
+      let restored = false;
+      let missingPrompt = false;
+
       if (mediaDataUrl) {
-        setMediaUrl(mediaDataUrl);
-        buildPeaks(mediaDataUrl).then(setPeaks).catch(() => undefined);
+        const mediaBlob = await dataUrlToBlob(mediaDataUrl);
+        const name = loaded.media?.name ?? "audio";
+        const mimeType =
+          loaded.media?.mimeType || mediaBlob.type || "application/octet-stream";
+        await applyMediaBlob(mediaBlob, { name, mimeType }, loaded.id);
+        restored = true;
       } else {
-        setMediaUrl(null);
+        const stored = await getProjectMedia(loaded.id).catch(() => null);
+        if (stored) {
+          await applyMediaBlob(
+            stored.blob,
+            { name: stored.name, mimeType: stored.mimeType },
+            loaded.id,
+            { persist: false },
+          );
+          restored = true;
+        } else {
+          clearPlaybackMedia();
+          if (loaded.media) missingPrompt = true;
+        }
       }
+
       setStatus(
         `Opened ${loaded.name} (${loaded.cues.length} cues).${
-          loaded.media && !mediaDataUrl
-            ? " Re-import media to restore playback (path refs only)."
-            : ""
+          restored
+            ? " Audio restored — play/scrub ready."
+            : missingPrompt
+              ? ` Media file missing (“${loaded.media!.name}”). Re-import audio to restore playback.`
+              : ""
         }`,
       );
     } catch (err) {
@@ -211,13 +316,13 @@ export function App() {
   };
 
   const onNewProject = () => {
-    if (mediaUrl) URL.revokeObjectURL(mediaUrl);
+    const previousId = project.id;
+    clearPlaybackMedia();
+    void deleteProjectMedia(previousId).catch(() => undefined);
     const p = createProject("Untitled Show");
     setProject(p);
     setActiveDeptId(p.departments[0]?.id ?? "");
     setSelectedCueId(null);
-    setMediaUrl(null);
-    setPeaks(null);
     setPlaying(false);
     setCurrentTime(0);
     setStatus("New project created.");
