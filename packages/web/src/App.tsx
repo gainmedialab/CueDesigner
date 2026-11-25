@@ -50,6 +50,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ChangeEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -118,6 +119,9 @@ export function App() {
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const tracksRef = useRef<HTMLDivElement>(null);
+  const clockNowRef = useRef<HTMLSpanElement>(null);
+  const scrubRef = useRef<HTMLInputElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
   const metronomeRef = useRef<Metronome | null>(null);
@@ -127,6 +131,15 @@ export function App() {
   const wantPlayingRef = useRef(false);
   /** Mirrors transport for the RAF clock so the playhead moves before React commits. */
   const playingRef = useRef(false);
+  /** Latest media time — RAF owns this while playing; React state is throttled. */
+  const currentTimeRef = useRef(0);
+  const lastReactTimePushMsRef = useRef(0);
+  const lastWaveScrollSyncMsRef = useRef(0);
+  const lastClockLabelRef = useRef("");
+  const durationRef = useRef(0);
+  const timeModeRef = useRef<TimeDisplayMode>(timeMode);
+  const projectSettingsRef = useRef(project.settings);
+  const followActiveRef = useRef(false);
   /** After zoom, restore scroll so this time stays under cursorX in the scrollport. */
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
@@ -143,6 +156,9 @@ export function App() {
   const [scrollPortW, setScrollPortW] = useState(0);
 
   const followActive = followPlayhead && !followSuspended;
+  followActiveRef.current = followActive;
+  timeModeRef.current = timeMode;
+  projectSettingsRef.current = project.settings;
 
   const setScrollLeftProgrammatic = useCallback((left: number) => {
     const el = timelineScrollRef.current;
@@ -258,14 +274,74 @@ export function App() {
     return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
-  // RAF clock driven by playingRef so the playhead advances from the first
-  // frame after audio.play() — not one React commit later (that hitch was
-  // visible as a sticky/jumpy timer right after Play / Pause→Play).
+  // RAF clock: sample audio.currentTime and update playhead/clock via DOM.
+  // Do NOT setState every frame — that re-rendered the whole App + Follow
+  // useLayoutEffect scrolled + redrew the waveform ~60×/s (visible stutter
+  // on playhead, timer, and click setTimeouts starving on the main thread).
   useEffect(() => {
+    const applyFollowScroll = (t: number, dur: number) => {
+      if (!followActiveRef.current) return;
+      const zoomNow = zoomRef.current;
+      if (!(zoomNow > 1) || !(dur > 0)) return;
+      const el = timelineScrollRef.current;
+      if (!el) return;
+      const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+      const playheadLaneX = (timeToLanePercent(t, dur) / 100) * laneW;
+      const viewLaneW = Math.max(1, el.clientWidth - TRACK_LABEL_W);
+      const targetViewX = viewLaneW * FOLLOW_VIEW_FRAC;
+      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+      const next = Math.max(
+        0,
+        Math.min(maxScroll, playheadLaneX - targetViewX),
+      );
+      if (Math.abs(el.scrollLeft - next) < 0.5) return;
+      // Keep suppress latched while we follow — avoid per-frame rAF churn.
+      suppressScrollFollowPauseRef.current = true;
+      el.scrollLeft = next;
+      const now = performance.now();
+      // Waveform scroll sync is cheap to skip most frames while following.
+      if (now - lastWaveScrollSyncMsRef.current > 120) {
+        lastWaveScrollSyncMsRef.current = now;
+        setTimelineScrollLeft(el.scrollLeft);
+      }
+    };
+
+    const pushDisplay = (t: number, dur: number, forceReact: boolean) => {
+      currentTimeRef.current = t;
+      const pct = `${timeToLanePercent(t, dur)}%`;
+      const tracks = tracksRef.current;
+      if (tracks) tracks.style.setProperty("--playhead-pct", pct);
+
+      const label = formatTime(t, timeModeRef.current, projectSettingsRef.current);
+      if (label !== lastClockLabelRef.current) {
+        lastClockLabelRef.current = label;
+        const clockEl = clockNowRef.current;
+        if (clockEl) clockEl.textContent = label;
+      }
+
+      const scrub = scrubRef.current;
+      if (scrub) {
+        const max = Number(scrub.max) || 1;
+        scrub.value = String(Math.min(t, max));
+      }
+
+      applyFollowScroll(t, dur);
+
+      const now = performance.now();
+      if (
+        forceReact ||
+        now - lastReactTimePushMsRef.current > 100
+      ) {
+        lastReactTimePushMsRef.current = now;
+        setCurrentTime(t);
+      }
+    };
+
     const tick = () => {
       const audio = audioRef.current;
       if (audio && playingRef.current) {
-        setCurrentTime(audio.currentTime);
+        const dur = durationRef.current || audio.duration || 0;
+        pushDisplay(audio.currentTime, dur, false);
       }
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -304,6 +380,7 @@ export function App() {
   }, []);
 
   const duration = project.media?.durationSec ?? 0;
+  durationRef.current = duration;
   const zoom = clampTimelineZoom(project.settings.timelineZoom);
   zoomRef.current = zoom;
 
@@ -357,31 +434,8 @@ export function App() {
     );
   }, [zoom, duration, setScrollLeftProgrammatic]);
 
-  // While playing with follow on and zoomed, keep the playhead in the viewport.
-  useLayoutEffect(() => {
-    if (!playing || !followActive || zoom <= 1 || !(duration > 0)) return;
-    const el = timelineScrollRef.current;
-    if (!el) return;
-    const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
-    const playheadLaneX =
-      (timeToLanePercent(currentTime, duration) / 100) * laneW;
-    const viewLaneW = Math.max(1, el.clientWidth - TRACK_LABEL_W);
-    const targetViewX = viewLaneW * FOLLOW_VIEW_FRAC;
-    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
-    const next = Math.max(
-      0,
-      Math.min(maxScroll, playheadLaneX - targetViewX),
-    );
-    if (Math.abs(el.scrollLeft - next) < 0.5) return;
-    setScrollLeftProgrammatic(next);
-  }, [
-    playing,
-    followActive,
-    zoom,
-    duration,
-    currentTime,
-    setScrollLeftProgrammatic,
-  ]);
+  // Follow-while-playing is handled inside the RAF clock (direct scrollLeft).
+  // A useLayoutEffect on currentTime caused per-frame React+waveform thrash.
 
   const applyTimelineZoom = useCallback(
     (nextZoom: number, anchor: { t: number; cursorX: number } | null) => {
@@ -441,14 +495,30 @@ export function App() {
     return () => el.removeEventListener("wheel", onWheel);
   }, [applyTimelineZoom, duration, zoom]);
 
+  const paintTransportTime = useCallback((t: number, dur: number) => {
+    currentTimeRef.current = t;
+    const pct = `${timeToLanePercent(t, dur)}%`;
+    tracksRef.current?.style.setProperty("--playhead-pct", pct);
+    const label = formatTime(t, timeModeRef.current, projectSettingsRef.current);
+    lastClockLabelRef.current = label;
+    if (clockNowRef.current) clockNowRef.current.textContent = label;
+    const scrub = scrubRef.current;
+    if (scrub) {
+      const max = Number(scrub.max) || 1;
+      scrub.value = String(Math.min(t, max));
+    }
+  }, []);
+
   const seek = useCallback((t: number) => {
     const audio = audioRef.current;
     const clamped = Math.max(0, Math.min(t, audio?.duration || duration || 0));
     if (audio) audio.currentTime = clamped;
+    paintTransportTime(clamped, duration);
     setCurrentTime(clamped);
-    // Immediate re-anchor (seeked also fires); keeps click locked across scrub.
+    lastReactTimePushMsRef.current = performance.now();
+    // Seek only — never re-anchor on plain Play (that caused trail/snap).
     metronomeRef.current?.lockToMediaClock();
-  }, [duration]);
+  }, [duration, paintTransportTime]);
 
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
@@ -460,7 +530,11 @@ export function App() {
       transportGenRef.current += 1;
       metronomeRef.current?.setPlaying(false);
       audio.pause();
-      setCurrentTime(audio.currentTime);
+      const t = audio.currentTime;
+      paintTransportTime(t, durationRef.current || audio.duration || 0);
+      setCurrentTime(t);
+      lastReactTimePushMsRef.current = performance.now();
+      suppressScrollFollowPauseRef.current = false;
       setPlaying(false);
       return;
     }
@@ -484,11 +558,13 @@ export function App() {
         metronomeRef.current?.setPlaying(false);
         return;
       }
-      // Arm RAF clock before React commits (playingRef) — avoids sticky timer.
+      // Arm RAF before React commit; paint DOM playhead/clock immediately.
       playingRef.current = true;
-      setCurrentTime(audio.currentTime);
-      // Start click scheduler after media is running; no lockToMediaClock here
-      // (that cleared ticks and caused Pause→Play trail/snap in 308425a).
+      const t = audio.currentTime;
+      paintTransportTime(t, durationRef.current || audio.duration || 0);
+      setCurrentTime(t);
+      lastReactTimePushMsRef.current = performance.now();
+      // Start click scheduler after media is running; no lockToMediaClock here.
       metronomeRef.current?.setPlaying(true);
       setPlaying(true);
     } catch (err) {
@@ -499,7 +575,7 @@ export function App() {
       setPlaying(false);
       setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, [mediaUrl]);
+  }, [mediaUrl, paintTransportTime]);
 
   const togglePlayRef = useRef(togglePlay);
   togglePlayRef.current = togglePlay;
@@ -1009,7 +1085,11 @@ export function App() {
           ))}
         </div>
         <div className="clock-block">
-          <span className="clock" title={timeDisplayModeLabel(timeMode)}>
+          <span
+            ref={clockNowRef}
+            className="clock"
+            title={timeDisplayModeLabel(timeMode)}
+          >
             {clockNow}
           </span>
           <span className="clock-mode-label">
@@ -1017,6 +1097,7 @@ export function App() {
           </span>
         </div>
         <input
+          ref={scrubRef}
           className="scrub"
           type="range"
           min={0}
@@ -1451,7 +1532,15 @@ export function App() {
                   })}
                 </div>
               </div>
-              <div className="tracks">
+              <div
+                ref={tracksRef}
+                className="tracks"
+                style={
+                  {
+                    ["--playhead-pct"]: `${playheadPct}%`,
+                  } as CSSProperties
+                }
+              >
                 {project.departments.map((d, idx) => (
                   <div className="track" key={d.id}>
                     <div className="track-label">
@@ -1491,10 +1580,7 @@ export function App() {
                             />
                           );
                         })}
-                      <div
-                        className="playhead"
-                        style={{ left: `${playheadPct}%` }}
-                      />
+                      <div className="playhead" />
                     </div>
                   </div>
                 ))}

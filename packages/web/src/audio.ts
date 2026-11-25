@@ -504,8 +504,14 @@ export class Metronome {
     beatIndex: number,
   ): void {
     this.scheduledBeats.add(beatIndex);
-    const epoch = this.schedulerEpoch;
     const level = downbeat ? 1 : 0.75;
+    // Fire immediately when due — avoids setTimeout jitter when the main
+    // thread was busy (and keeps clicks locked to audio.currentTime).
+    if (delayMs <= 8) {
+      this.fireClick(downbeat, this.volume * level);
+      return;
+    }
+    const epoch = this.schedulerEpoch;
     const id = window.setTimeout(() => {
       const i = this.pendingTimeouts.indexOf(id);
       if (i >= 0) this.pendingTimeouts.splice(i, 1);
