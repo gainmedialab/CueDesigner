@@ -226,6 +226,17 @@ input[type="color"] {
   width: 4.5rem;
 }
 
+/* BPM is typically ≤999 — keep the field ~3 digits wide. */
+.bpm-field .bpm-input {
+  width: 3.5ch;
+  min-width: 3.5ch;
+  max-width: 4.5ch;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .grid-field select {
   background: var(--bg);
   border: 1px solid var(--border);

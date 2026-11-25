@@ -544,11 +544,12 @@ export function App() {
       if (key === "c") {
         if (e.repeat) return;
         e.preventDefault();
-        setProject((p) =>
-          updateSettings(p, {
-            metronomeEnabled: !p.settings.metronomeEnabled,
-          }),
-        );
+        setProject((p) => {
+          const next = !p.settings.metronomeEnabled;
+          // Sync metronome immediately — don't wait for the settings effect.
+          metronomeRef.current?.setEnabled(next);
+          return updateSettings(p, { metronomeEnabled: next });
+        });
         return;
       }
       if (key === "g") {
@@ -1035,12 +1036,15 @@ export function App() {
       </div>
 
       <div className="grid-bar" aria-label="BPM and snap settings">
-        <label className="grid-field">
+        <label className="grid-field bpm-field">
           BPM
           <input
+            className="bpm-input"
             type="text"
             inputMode="numeric"
             pattern="[0-9]*"
+            maxLength={3}
+            size={3}
             value={bpmDraft ?? String(project.settings.bpm)}
             title="Whole BPM only (integer). Clear and type, then Enter or blur to apply."
             aria-label="BPM"
@@ -1197,11 +1201,14 @@ export function App() {
           <input
             type="checkbox"
             checked={project.settings.metronomeEnabled}
-            onChange={(e) =>
+            onChange={(e) => {
+              const on = e.target.checked;
+              // Apply immediately so Play in the same turn already sees Click on.
+              metronomeRef.current?.setEnabled(on);
               setProject((p) =>
-                updateSettings(p, { metronomeEnabled: e.target.checked }),
-              )
-            }
+                updateSettings(p, { metronomeEnabled: on }),
+              );
+            }}
             title="Click on the BPM beat grid while playing (accent on downbeat)"
           />
           Click
@@ -1218,13 +1225,13 @@ export function App() {
             disabled={!project.settings.metronomeEnabled}
             title="Metronome click volume"
             aria-label="Metronome volume"
-            onChange={(e) =>
+            onChange={(e) => {
+              const vol = Number(e.target.value);
+              metronomeRef.current?.setVolume(vol);
               setProject((p) =>
-                updateSettings(p, {
-                  metronomeVolume: Number(e.target.value),
-                }),
-              )
-            }
+                updateSettings(p, { metronomeVolume: vol }),
+              );
+            }}
           />
         </label>
         <div className="grid-field zoom-field" aria-label="Timeline zoom">
