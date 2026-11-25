@@ -295,6 +295,10 @@ const CLICK_URI_LOW = pcmToDataUri(synthesizeClickPcm(CLICK_SR, 1000, 0.9), CLIC
  * path, reuse only free (paused/ended) elements, seek to 0 only when needed,
  * skip the beat if the pool is busy. One-time muted unlock under Play/Click
  * gesture via `resume()` / `auditionSync()` (must not gate media.play()).
+ *
+ * Sync: look-ahead from live media `currentTime`, fire `play()` early by
+ * `clickLeadSec` so HTMLAudio start latency lands the tick on the beat
+ * (not trailing the playhead / track).
  */
 export class Metronome {
   private poolHigh: HTMLAudioElement[] = [];
@@ -318,7 +322,13 @@ export class Metronome {
   };
   private getMediaTime: () => number = () => 0;
   private scheduledBeats = new Set<number>();
-  private readonly scheduleHorizonSec = 0.22;
+  private readonly scheduleHorizonSec = 0.28;
+  /**
+   * How early to call HTMLAudio.play() before beat media time so the tick
+   * is heard on the grid (HTMLAudio start latency). Fixed — probing an
+   * AudioContext on Play hitching the clock in testing.
+   */
+  private readonly clickLeadSec = 0.08;
   /** Diagnostics: successful element.play() attempts. */
   clicksStarted = 0;
 
@@ -497,7 +507,7 @@ export class Metronome {
     void this.unlockPool();
     this.scheduledBeats.clear();
     this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
-    this.timer = window.setInterval(() => this.tick(), 50);
+    this.timer = window.setInterval(() => this.tick(), 40);
     this.tick();
   }
 
@@ -527,17 +537,20 @@ export class Metronome {
 
     const origin = this.grid.downbeatOffsetSec || 0;
     const bpb = this.beatsPerBar();
+    const lead = this.clickLeadSec;
     const want = this.beatIndexAt(mediaNow);
     if (this.nextBeatIndex < want - 1 || this.nextBeatIndex > want + 4) {
       this.nextBeatIndex = want;
     }
-    const until = mediaNow + this.scheduleHorizonSec;
+    // Horizon includes lead so we can arm play() before the beat.
+    const until = mediaNow + this.scheduleHorizonSec + lead;
 
     while (true) {
       const beatIndex = this.nextBeatIndex;
       const tAbs = origin + beatIndex * beatSec;
       if (tAbs > until) break;
-      if (tAbs < 0 || tAbs < mediaNow - 0.012) {
+      // Too late to hear on the beat (past beat + small grace).
+      if (tAbs < 0 || tAbs < mediaNow - 0.02) {
         this.nextBeatIndex += 1;
         if (this.nextBeatIndex > 1e7) break;
         continue;
@@ -547,8 +560,10 @@ export class Metronome {
         continue;
       }
       const beatInBar = ((beatIndex % bpb) + bpb) % bpb;
-      const delayMs = Math.max(0, (tAbs - mediaNow) * 1000);
-      this.scheduleElementClick(delayMs, beatInBar === 0, beatIndex);
+      // Fire play() early by `lead` so sound arrives near tAbs.
+      const fireAtMedia = tAbs - lead;
+      const delayMs = Math.max(0, (fireAtMedia - mediaNow) * 1000);
+      this.scheduleElementClick(delayMs, beatInBar === 0, beatIndex, tAbs);
       this.nextBeatIndex += 1;
       if (this.nextBeatIndex > 1e7) break;
     }
@@ -566,11 +581,13 @@ export class Metronome {
     delayMs: number,
     downbeat: boolean,
     beatIndex: number,
+    tAbs: number,
   ): void {
     this.scheduledBeats.add(beatIndex);
     const level = downbeat ? 1 : 0.7;
-    if (delayMs <= 6) {
-      this.fireClick(downbeat, this.volume * level);
+    const vol = this.volume * level;
+    if (delayMs <= 4) {
+      this.fireForBeat(downbeat, vol, tAbs);
       return;
     }
     const epoch = this.schedulerEpoch;
@@ -579,9 +596,36 @@ export class Metronome {
       if (i >= 0) this.pendingTimeouts.splice(i, 1);
       if (epoch !== this.schedulerEpoch) return;
       if (!this.enabled || !this.playing) return;
-      this.fireClick(downbeat, this.volume * level);
+      this.fireForBeat(downbeat, vol, tAbs);
     }, delayMs);
     this.pendingTimeouts.push(id);
+  }
+
+  /**
+   * At timeout: re-read media clock. If still early, wait; if too late, skip.
+   * Then start HTMLAudio so latency lands near tAbs.
+   */
+  private fireForBeat(downbeat: boolean, vol: number, tAbs: number): void {
+    if (!this.enabled || !this.playing) return;
+    const mediaNow = this.getMediaTime();
+    if (!Number.isFinite(mediaNow)) return;
+    const lead = this.clickLeadSec;
+    const fireAt = tAbs - lead;
+    // Missed the window — don't stack late ticks behind the playhead.
+    if (mediaNow > tAbs + 0.04) return;
+    if (mediaNow < fireAt - 0.01) {
+      const waitMs = Math.max(4, (fireAt - mediaNow) * 1000);
+      const epoch = this.schedulerEpoch;
+      const id = window.setTimeout(() => {
+        const i = this.pendingTimeouts.indexOf(id);
+        if (i >= 0) this.pendingTimeouts.splice(i, 1);
+        if (epoch !== this.schedulerEpoch) return;
+        this.fireForBeat(downbeat, vol, tAbs);
+      }, waitMs);
+      this.pendingTimeouts.push(id);
+      return;
+    }
+    this.fireClick(downbeat, vol);
   }
 
   /**
