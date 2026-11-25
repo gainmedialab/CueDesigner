@@ -469,13 +469,14 @@ export function App() {
     wantPlayingRef.current = true;
     const gen = ++transportGenRef.current;
     try {
-      // Resume click AudioContext under this gesture (media stays native —
-      // never create MediaElementSource; that muted the element before).
-      await metronomeRef.current?.resume();
-      if (gen !== transportGenRef.current) {
-        wantPlayingRef.current = false;
-        return;
+      // Sync click under THIS gesture (no await — awaiting unlock before
+      // audio.play() was the Play hitch from ca48145 / 323fc58).
+      if (metronomeRef.current?.isEnabled()) {
+        metronomeRef.current.auditionSync();
+      } else {
+        void metronomeRef.current?.resume();
       }
+      // Start media immediately — do not await click priming first.
       await audio.play();
       if (gen !== transportGenRef.current) {
         wantPlayingRef.current = false;
@@ -483,14 +484,13 @@ export function App() {
         metronomeRef.current?.setPlaying(false);
         return;
       }
+      // Arm RAF clock before React commits (playingRef) — avoids sticky timer.
       playingRef.current = true;
       setCurrentTime(audio.currentTime);
+      // Start click scheduler after media is running; no lockToMediaClock here
+      // (that cleared ticks and caused Pause→Play trail/snap in 308425a).
       metronomeRef.current?.setPlaying(true);
       setPlaying(true);
-      // Immediate click under the same Play gesture when Click is already on.
-      if (metronomeRef.current?.isEnabled()) {
-        void metronomeRef.current.audition();
-      }
     } catch (err) {
       if (gen !== transportGenRef.current) return;
       wantPlayingRef.current = false;
@@ -548,9 +548,9 @@ export function App() {
         setProject((p) => {
           const next = !p.settings.metronomeEnabled;
           metronomeRef.current?.setEnabled(next);
-          // Audible proof on the same key gesture (HTMLAudioElement click path).
+          // Sync audition under this key gesture (no await — keeps autoplay).
           if (next) {
-            void metronomeRef.current?.audition();
+            metronomeRef.current?.auditionSync();
           }
           return updateSettings(p, { metronomeEnabled: next });
         });
@@ -1210,7 +1210,7 @@ export function App() {
               // Apply immediately so Play in the same turn already sees Click on.
               metronomeRef.current?.setEnabled(on);
               if (on) {
-                void metronomeRef.current?.audition();
+                metronomeRef.current?.auditionSync();
               }
               setProject((p) =>
                 updateSettings(p, { metronomeEnabled: on }),
