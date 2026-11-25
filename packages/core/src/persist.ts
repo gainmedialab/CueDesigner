@@ -1,4 +1,10 @@
-import { clampTimelineZoom, defaultSettings } from "./project.js";
+import {
+  clampBpm,
+  clampMetronomeVolume,
+  clampTimelineZoom,
+  defaultSettings,
+} from "./project.js";
+import { isFrameRateLabel } from "./time.js";
 import {
   PROJECT_SCHEMA_VERSION,
   type GridResolution,
@@ -29,7 +35,7 @@ function normalizeSettings(raw: unknown): ProjectSettings {
   const s = raw as Record<string, unknown>;
   const bpm =
     typeof s.bpm === "number" && Number.isFinite(s.bpm) && s.bpm > 0
-      ? s.bpm
+      ? clampBpm(s.bpm)
       : defaults.bpm;
   let timeSignature: [number, number] = defaults.timeSignature;
   if (Array.isArray(s.timeSignature) && s.timeSignature.length >= 2) {
@@ -55,11 +61,19 @@ function normalizeSettings(raw: unknown): ProjectSettings {
     typeof s.timelineZoom === "number" && Number.isFinite(s.timelineZoom)
       ? clampTimelineZoom(s.timelineZoom)
       : defaults.timelineZoom;
+  const metronomeEnabled =
+    typeof s.metronomeEnabled === "boolean"
+      ? s.metronomeEnabled
+      : defaults.metronomeEnabled;
+  const metronomeVolume =
+    typeof s.metronomeVolume === "number" && Number.isFinite(s.metronomeVolume)
+      ? clampMetronomeVolume(s.metronomeVolume)
+      : defaults.metronomeVolume;
   const fps =
-    typeof s.fps === "string" ? (s.fps as ProjectSettings["fps"]) : defaults.fps;
+    typeof s.fps === "string" && isFrameRateLabel(s.fps) ? s.fps : defaults.fps;
   const showTcOffsetSec =
     typeof s.showTcOffsetSec === "number" && Number.isFinite(s.showTcOffsetSec)
-      ? s.showTcOffsetSec
+      ? Math.max(0, s.showTcOffsetSec)
       : defaults.showTcOffsetSec;
   return {
     bpm,
@@ -68,6 +82,8 @@ function normalizeSettings(raw: unknown): ProjectSettings {
     gridResolution,
     snapEnabled,
     timelineZoom,
+    metronomeEnabled,
+    metronomeVolume,
     fps,
     showTcOffsetSec,
   };

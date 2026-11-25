@@ -1,5 +1,6 @@
 import {
   addDepartment,
+  clampBpm,
   clampTimelineZoom,
   createCue,
   createId,
@@ -10,11 +11,18 @@ import {
   deserializeProject,
   formatAbsoluteTime,
   formatMusicalPosition,
+  formatTime,
+  formatTimecode,
+  FRAME_RATE_LABELS,
   GRID_RESOLUTIONS,
   gridLineTimes,
   gridResolutionLabel,
+  lanePercentToTime,
   moveCue,
+  musicalRulerMarkTimes,
   nextDeptCueNumber,
+  parseTime,
+  parseTimecode,
   placeCue,
   projectDownloadBlob,
   renameDepartment,
@@ -22,12 +30,19 @@ import {
   rulerMarkTimes,
   setProjectMedia,
   snapToGrid,
+  TIME_DISPLAY_MODES,
+  timeDisplayModeLabel,
+  timeFieldLabel,
+  timeInputPlaceholder,
+  timeToLanePercent,
   touchProject,
   updateCue,
   updateSettings,
   type Cue,
+  type FrameRateLabel,
   type GridResolution,
   type Project,
+  type TimeDisplayMode,
 } from "@cuedesigner/core";
 import {
   useCallback,
@@ -38,7 +53,13 @@ import {
   type ChangeEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { buildPeaks, drawPeaks, loadAudioFile } from "./audio";
+import {
+  Metronome,
+  drawWaveform,
+  loadAudioFile,
+  loadWaveformData,
+  type WaveformData,
+} from "./audio";
 import {
   MEDIA_EMBED_MAX_BYTES,
   blobToDataUrl,
@@ -71,10 +92,24 @@ export function App() {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
-  const [peaks, setPeaks] = useState<Float32Array | null>(null);
+  const [waveform, setWaveform] = useState<WaveformData | null>(null);
   const [status, setStatus] = useState("New project — import audio to begin.");
   const [newDeptName, setNewDeptName] = useState("");
   const [newDeptColor, setNewDeptColor] = useState("#5b8def");
+  /** Session UI preference — storage stays absolute seconds. */
+  const [timeMode, setTimeMode] = useState<TimeDisplayMode>("absolute");
+  const [inspectorTimeDraft, setInspectorTimeDraft] = useState<string | null>(
+    null,
+  );
+  const [tcOffsetDraft, setTcOffsetDraft] = useState<string | null>(null);
+  /** Local BPM field text while editing — null means show committed project BPM. */
+  const [bpmDraft, setBpmDraft] = useState<string | null>(null);
+  /** Scrollport scrollLeft — drives viewport waveform redraw. */
+  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
+  /** User Follow preference — only the checkbox toggles this (latches across play/pause). */
+  const [followPlayhead, setFollowPlayhead] = useState(true);
+  /** Temporary pause after manual scroll; cleared on Play or re-checking Follow. */
+  const [followSuspended, setFollowSuspended] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
@@ -83,14 +118,33 @@ export function App() {
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
+  const metronomeRef = useRef<Metronome | null>(null);
   /** After zoom, restore scroll so this time stays under cursorX in the scrollport. */
   const pendingZoomAnchorRef = useRef<{ t: number; cursorX: number } | null>(
     null,
   );
+  /** Ignore programmatic scrollLeft when deciding to suspend follow. */
+  const suppressScrollFollowPauseRef = useRef(false);
+  const followPlayheadRef = useRef(followPlayhead);
+  followPlayheadRef.current = followPlayhead;
   /** Current session media bytes (for save embed + IndexedDB). */
   const mediaBlobRef = useRef<Blob | null>(null);
   const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
   const [scrollPortW, setScrollPortW] = useState(0);
+
+  const setScrollLeftProgrammatic = useCallback((left: number) => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    suppressScrollFollowPauseRef.current = true;
+    el.scrollLeft = left;
+    setTimelineScrollLeft(el.scrollLeft);
+    // Hold suppress across deferred scroll events (some engines fire async).
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        suppressScrollFollowPauseRef.current = false;
+      });
+    });
+  }, []);
 
   // Keep active department valid
   useEffect(() => {
@@ -99,19 +153,60 @@ export function App() {
     }
   }, [project.departments, activeDeptId]);
 
-  // Audio element lifecycle
+  // Drop in-progress time drafts when the target or mode changes
+  useEffect(() => {
+    setInspectorTimeDraft(null);
+  }, [selectedCueId, timeMode]);
+
+  useEffect(() => {
+    setTcOffsetDraft(null);
+  }, [project.settings.fps, project.settings.showTcOffsetSec]);
+
+  // Audio element + click metronome. Media uses native HTMLMediaElement (no MES).
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "auto";
     audioRef.current = audio;
+    const metronome = new Metronome();
+    metronomeRef.current = metronome;
+    metronome.setMediaTimeGetter(() => audioRef.current?.currentTime ?? 0);
+    metronome.attachMediaElement(audio);
     const onEnded = () => setPlaying(false);
+    const onSeeked = () => metronomeRef.current?.resync();
     audio.addEventListener("ended", onEnded);
+    audio.addEventListener("seeked", onSeeked);
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("seeked", onSeeked);
       audioRef.current = null;
+      metronome.dispose();
+      metronomeRef.current = null;
     };
   }, []);
+
+  // Keep metronome grid / enable / volume in sync with project settings
+  useEffect(() => {
+    const m = metronomeRef.current;
+    if (!m) return;
+    m.setGrid({
+      bpm: project.settings.bpm,
+      timeSignature: project.settings.timeSignature,
+      downbeatOffsetSec: project.settings.downbeatOffsetSec,
+    });
+    m.setEnabled(project.settings.metronomeEnabled);
+    m.setVolume(project.settings.metronomeVolume);
+  }, [
+    project.settings.bpm,
+    project.settings.timeSignature,
+    project.settings.downbeatOffsetSec,
+    project.settings.metronomeEnabled,
+    project.settings.metronomeVolume,
+  ]);
+
+  useEffect(() => {
+    metronomeRef.current?.setPlaying(playing);
+  }, [playing]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -123,6 +218,25 @@ export function App() {
       audio.removeAttribute("src");
       audio.load();
     }
+  }, [mediaUrl]);
+
+  // Keep project duration locked to the HTMLMediaElement playback clock so
+  // playhead % / grid / heard audio share one timebase.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !mediaUrl) return;
+    const syncDuration = () => {
+      const d = audio.duration;
+      if (!Number.isFinite(d) || !(d > 0)) return;
+      setProject((p) => {
+        if (!p.media) return p;
+        if (Math.abs(p.media.durationSec - d) < 0.0005) return p;
+        return setProjectMedia(p, { ...p.media, durationSec: d });
+      });
+    };
+    audio.addEventListener("loadedmetadata", syncDuration);
+    if (audio.readyState >= 1) syncDuration();
+    return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
   // RAF clock while playing
@@ -142,29 +256,73 @@ export function App() {
     };
   }, [playing]);
 
-  // Measure timeline scrollport for denser ruler marks
+  // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
+  // Manual scroll suspends follow (checkbox stays on); programmatic scrolls are ignored.
   useEffect(() => {
     const el = timelineScrollRef.current;
     if (!el) return;
-    const measure = () => setScrollPortW(el.clientWidth);
+    const measure = () => {
+      setScrollPortW(el.clientWidth);
+      setTimelineScrollLeft(el.scrollLeft);
+    };
     measure();
+    const onScroll = () => {
+      setTimelineScrollLeft(el.scrollLeft);
+      if (
+        !suppressScrollFollowPauseRef.current &&
+        followPlayheadRef.current
+      ) {
+        setFollowSuspended(true);
+      }
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
     const ro = new ResizeObserver(measure);
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+    };
   }, []);
-
-  // Draw waveform on first track lane width
-  useEffect(() => {
-    const canvas = waveCanvasRef.current;
-    if (!canvas || !peaks) return;
-    drawPeaks(canvas, peaks, "#6b8caf");
-    const onResize = () => drawPeaks(canvas, peaks, "#6b8caf");
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [peaks, project.departments.length, project.settings.timelineZoom]);
 
   const duration = project.media?.durationSec ?? 0;
   const zoom = clampTimelineZoom(project.settings.timelineZoom);
+
+  // Viewport waveform: peaks keyed to the same tAbs % as cues/grid/playhead.
+  // Canvas covers only the visible lane slice so zoom keeps ~1 peak per device pixel.
+  useEffect(() => {
+    const canvas = waveCanvasRef.current;
+    const scrollEl = timelineScrollRef.current;
+    if (!canvas || !waveform || !scrollEl || !(duration > 0)) return;
+
+    const laneW = Math.max(1, scrollEl.scrollWidth - TRACK_LABEL_W);
+    // Lane scrolls under the sticky 100px label; only the uncovered slice is visible.
+    const viewStartPx = Math.max(0, Math.min(laneW, timelineScrollLeft));
+    const viewEndPx = Math.max(
+      viewStartPx,
+      Math.min(
+        laneW,
+        timelineScrollLeft + scrollEl.clientWidth - TRACK_LABEL_W,
+      ),
+    );
+    const viewW = Math.max(1, viewEndPx - viewStartPx);
+    canvas.style.left = `${viewStartPx}px`;
+    canvas.style.width = `${viewW}px`;
+    canvas.style.right = "auto";
+
+    drawWaveform(canvas, waveform, {
+      timelineDurationSec: duration,
+      viewStartFrac: viewStartPx / laneW,
+      viewEndFrac: viewEndPx / laneW,
+      color: "#6b8caf",
+    });
+  }, [
+    waveform,
+    duration,
+    zoom,
+    timelineScrollLeft,
+    scrollPortW,
+    project.departments.length,
+  ]);
 
   // Keep zoom-to-cursor / zoom-around-playhead scroll anchor after layout
   useLayoutEffect(() => {
@@ -173,9 +331,15 @@ export function App() {
     if (!anchor || !el || !(duration > 0)) return;
     pendingZoomAnchorRef.current = null;
     const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
-    const laneX = (anchor.t / duration) * laneW;
-    el.scrollLeft = Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX);
-  }, [zoom, duration]);
+    const laneX = (timeToLanePercent(anchor.t, duration) / 100) * laneW;
+    setScrollLeftProgrammatic(
+      Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX),
+    );
+  }, [zoom, duration, setScrollLeftProgrammatic]);
+
+  // Follow auto-scroll during play intentionally omitted in this baseline
+  // restore (pre-shortcut). The currentTime→useLayoutEffect follow path from
+  // 35c6e11 caused per-frame React/waveform thrash. Checkbox still latches.
 
   const applyTimelineZoom = useCallback(
     (nextZoom: number, anchor: { t: number; cursorX: number } | null) => {
@@ -194,7 +358,9 @@ export function App() {
       if (el && duration > 0) {
         const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
         const playheadViewX =
-          TRACK_LABEL_W + (currentTime / duration) * laneW - el.scrollLeft;
+          TRACK_LABEL_W +
+          (timeToLanePercent(currentTime, duration) / 100) * laneW -
+          el.scrollLeft;
         if (playheadViewX >= 0 && playheadViewX <= el.clientWidth) {
           cursorX = playheadViewX;
         }
@@ -212,6 +378,9 @@ export function App() {
       if (!(e.ctrlKey || e.metaKey)) {
         if (zoom > 1 && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
           e.preventDefault();
+          // Explicit user pan — suspend follow even if a programmatic scroll
+          // still holds the suppress flag from the prior frame.
+          if (followPlayheadRef.current) setFollowSuspended(true);
           el.scrollLeft += e.deltaY;
         }
         return;
@@ -222,10 +391,7 @@ export function App() {
       const contentX = el.scrollLeft + cursorX;
       const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
       const laneX = contentX - TRACK_LABEL_W;
-      const t =
-        duration > 0
-          ? Math.max(0, Math.min(duration, (laneX / laneW) * duration))
-          : 0;
+      const t = lanePercentToTime((laneX / laneW) * 100, duration);
       const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
       applyTimelineZoom(zoom * factor, { t, cursorX });
     };
@@ -238,6 +404,8 @@ export function App() {
     const clamped = Math.max(0, Math.min(t, audio?.duration || duration || 0));
     if (audio) audio.currentTime = clamped;
     setCurrentTime(clamped);
+    // Immediate resync (seeked also fires); keeps click locked across scrub.
+    metronomeRef.current?.resync();
   }, [duration]);
 
   const togglePlay = useCallback(async () => {
@@ -247,8 +415,14 @@ export function App() {
       audio.pause();
       setPlaying(false);
     } else {
+      // Clear scroll suspension; checkbox preference stays latched.
+      setFollowSuspended(false);
       try {
-        await audio.play();
+        // Start media immediately (native element). Click AudioContext resume
+        // is non-blocking — never await click priming before audio.play().
+        const playP = audio.play();
+        void metronomeRef.current?.resume();
+        await playP;
         setPlaying(true);
       } catch (err) {
         setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -259,7 +433,7 @@ export function App() {
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
     setMediaUrl(null);
-    setPeaks(null);
+    setWaveform(null);
     mediaBlobRef.current = null;
     mediaMetaRef.current = null;
   }, [mediaUrl]);
@@ -276,7 +450,7 @@ export function App() {
       mediaBlobRef.current = blob;
       mediaMetaRef.current = meta;
       setMediaUrl(objectUrl);
-      setPeaks(null);
+      setWaveform(null);
       if (opts?.persist !== false) {
         try {
           await putProjectMedia(projectId, blob, meta);
@@ -284,8 +458,8 @@ export function App() {
           // IndexedDB optional — in-memory + embed still work this session
         }
       }
-      buildPeaks(objectUrl)
-        .then(setPeaks)
+      loadWaveformData(objectUrl)
+        .then(setWaveform)
         .catch(() => undefined);
       return objectUrl;
     },
@@ -449,9 +623,8 @@ export function App() {
       touchProject({ ...p, cues: placeCue(p.cues, draft) }),
     );
     setSelectedCueId(draft.id);
-    const musical = formatMusicalPosition(tAbs, project.settings);
     setStatus(
-      `Placed cue at ${formatAbsoluteTime(tAbs)} (${musical})${
+      `Placed cue at ${formatTime(tAbs, timeMode, project.settings)}${
         bypassSnap || !project.settings.snapEnabled ? " — free" : " — snapped"
       }`,
     );
@@ -460,8 +633,8 @@ export function App() {
   const onLanePointer = (e: ReactPointerEvent<HTMLDivElement>, deptId: string) => {
     const lane = e.currentTarget;
     const rect = lane.getBoundingClientRect();
-    const ratio = (e.clientX - rect.left) / rect.width;
-    const rawT = ratio * (duration || 1);
+    const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+    const rawT = lanePercentToTime(ratio * 100, duration || 1);
     if (e.detail === 2) {
       // double-click places cue (Alt bypasses snap)
       const tAbs = applySnap(rawT, project.settings, e.altKey);
@@ -508,19 +681,26 @@ export function App() {
     const startRect = lane.getBoundingClientRect();
     const startWidth = startRect.width || 1;
     // Keep grab point relative to cue time so mousedown has zero delta.
-    const pointerTAtStart =
-      ((e.clientX - startRect.left) / startWidth) * (duration || 1);
+    const pointerTAtStart = lanePercentToTime(
+      ((e.clientX - startRect.left) / startWidth) * 100,
+      duration || 1,
+    );
     const grabOffsetT = pointerTAtStart - cue.tAbs;
 
     const onMove = (ev: PointerEvent) => {
       if (!dragCueIdRef.current) return;
       // Reject scrollport pan that can ride along with cue drag when zoomed.
       if (scrollEl && scrollEl.scrollLeft !== lockedScrollLeft) {
+        suppressScrollFollowPauseRef.current = true;
         scrollEl.scrollLeft = lockedScrollLeft;
+        suppressScrollFollowPauseRef.current = false;
       }
       const rect = lane.getBoundingClientRect();
       const width = rect.width || 1;
-      const pointerT = ((ev.clientX - rect.left) / width) * (duration || 1);
+      const pointerT = lanePercentToTime(
+        ((ev.clientX - rect.left) / width) * 100,
+        duration || 1,
+      );
       const raw = Math.max(0, Math.min(duration || 1, pointerT - grabOffsetT));
       setProject((p) => {
         const t = applySnap(raw, p.settings, ev.altKey);
@@ -546,8 +726,7 @@ export function App() {
 
   const selectedCue = project.cues.find((c) => c.id === selectedCueId) ?? null;
 
-  const playheadPct =
-    duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+  const playheadPct = timeToLanePercent(currentTime, duration);
 
   const gridLines =
     duration > 0
@@ -560,12 +739,56 @@ export function App() {
 
   const laneContentW = Math.max(0, scrollPortW * zoom - TRACK_LABEL_W);
   const rulerMarks =
-    duration > 0 ? rulerMarkTimes(duration, laneContentW || scrollPortW) : [];
+    duration > 0
+      ? timeMode === "musical"
+        ? musicalRulerMarkTimes(
+            project.settings,
+            duration,
+            laneContentW || scrollPortW,
+          )
+        : rulerMarkTimes(duration, laneContentW || scrollPortW)
+      : [];
 
-  const musicalNow = formatMusicalPosition(currentTime, project.settings);
+  const clockNow = formatTime(currentTime, timeMode, project.settings);
+  const clockEnd = formatTime(duration, timeMode, project.settings);
   const [sigNum, sigDen] = project.settings.timeSignature;
   const zoomLabel =
     zoom >= 10 ? `${Math.round(zoom)}×` : `${zoom.toFixed(1)}×`;
+  const tcOffsetDisplay =
+    tcOffsetDraft ??
+    formatTimecode(project.settings.showTcOffsetSec, project.settings.fps);
+
+  const commitInspectorTime = () => {
+    if (inspectorTimeDraft == null || !selectedCueId) {
+      setInspectorTimeDraft(null);
+      return;
+    }
+    const parsed = parseTime(
+      inspectorTimeDraft,
+      timeMode,
+      project.settings,
+    );
+    if (parsed != null) {
+      setProject((p) =>
+        touchProject({
+          ...p,
+          cues: moveCue(p.cues, selectedCueId, Math.max(0, parsed)),
+        }),
+      );
+    }
+    setInspectorTimeDraft(null);
+  };
+
+  const commitTcOffset = () => {
+    if (tcOffsetDraft == null) return;
+    const parsed = parseTimecode(tcOffsetDraft, project.settings.fps);
+    if (parsed != null) {
+      setProject((p) =>
+        updateSettings(p, { showTcOffsetSec: Math.max(0, parsed) }),
+      );
+    }
+    setTcOffsetDraft(null);
+  };
 
   return (
     <div className="app">
@@ -576,7 +799,7 @@ export function App() {
         <div className="meta">
           {project.name}
           {project.media ? ` · ${project.media.name}` : " · no media"}
-          {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen}`}
+          {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen} · ${project.settings.fps}`}
         </div>
         <div className="actions">
           <button type="button" onClick={onNewProject}>
@@ -619,10 +842,34 @@ export function App() {
         <button type="button" onClick={() => seek(0)} disabled={!mediaUrl}>
           ⇤
         </button>
+        <div
+          className="mode-switch"
+          role="group"
+          aria-label="Time display mode"
+        >
+          {TIME_DISPLAY_MODES.map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={timeMode === mode ? "mode-btn active" : "mode-btn"}
+              aria-pressed={timeMode === mode}
+              onClick={() => setTimeMode(mode)}
+              title={timeDisplayModeLabel(mode)}
+            >
+              {mode === "absolute"
+                ? "Abs"
+                : mode === "timecode"
+                  ? "TC"
+                  : "Mus"}
+            </button>
+          ))}
+        </div>
         <div className="clock-block">
-          <span className="clock">{formatAbsoluteTime(currentTime)}</span>
-          <span className="clock-musical" title="Musical position (bar.beat)">
-            {musicalNow}
+          <span className="clock" title={timeDisplayModeLabel(timeMode)}>
+            {clockNow}
+          </span>
+          <span className="clock-mode-label">
+            {timeDisplayModeLabel(timeMode)}
           </span>
         </div>
         <input
@@ -636,7 +883,7 @@ export function App() {
           onChange={(e) => seek(Number(e.target.value))}
         />
         <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
-          {formatAbsoluteTime(duration)}
+          {clockEnd}
         </span>
         <button
           type="button"
@@ -649,18 +896,36 @@ export function App() {
       </div>
 
       <div className="grid-bar" aria-label="BPM and snap settings">
-        <label className="grid-field">
+        <label className="grid-field bpm-field">
           BPM
           <input
-            type="number"
-            min={20}
-            max={400}
-            step={0.1}
-            value={project.settings.bpm}
+            className="bpm-input"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={3}
+            size={3}
+            value={bpmDraft ?? String(project.settings.bpm)}
+            title="Whole BPM only (integer). Clear and type, then Enter or blur to apply."
+            aria-label="BPM"
             onChange={(e) => {
-              const bpm = Number(e.target.value);
-              if (!Number.isFinite(bpm) || bpm <= 0) return;
-              setProject((p) => updateSettings(p, { bpm }));
+              const v = e.target.value;
+              if (v !== "" && !/^\d+$/.test(v)) return;
+              setBpmDraft(v);
+            }}
+            onBlur={() => {
+              if (bpmDraft == null) return;
+              const trimmed = bpmDraft.trim();
+              setBpmDraft(null);
+              if (trimmed === "") return;
+              const raw = Number(trimmed);
+              if (!Number.isFinite(raw)) return;
+              setProject((p) => updateSettings(p, { bpm: clampBpm(raw) }));
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              (e.target as HTMLInputElement).blur();
             }}
           />
         </label>
@@ -723,6 +988,44 @@ export function App() {
           <span className="unit">s</span>
         </label>
         <label className="grid-field">
+          FPS
+          <select
+            value={project.settings.fps}
+            title="Project frame rate for show timecode"
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, {
+                  fps: e.target.value as FrameRateLabel,
+                }),
+              )
+            }
+          >
+            {FRAME_RATE_LABELS.map((label) => (
+              <option key={label} value={label}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid-field">
+          TC offset
+          <input
+            type="text"
+            className="tc-offset-input"
+            value={tcOffsetDisplay}
+            spellCheck={false}
+            title="Show timecode at file start (HH:MM:SS:FF)"
+            placeholder="HH:MM:SS:FF"
+            onChange={(e) => setTcOffsetDraft(e.target.value)}
+            onBlur={commitTcOffset}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+          />
+        </label>
+        <label className="grid-field">
           Snap
           <select
             value={project.settings.gridResolution}
@@ -752,6 +1055,40 @@ export function App() {
             }
           />
           Magnetic snap
+        </label>
+        <label className="grid-field checkbox">
+          <input
+            type="checkbox"
+            checked={project.settings.metronomeEnabled}
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, { metronomeEnabled: e.target.checked }),
+              )
+            }
+            title="Click on the BPM beat grid while playing (accent on downbeat)"
+          />
+          Click
+        </label>
+        <label className="grid-field click-vol-field">
+          Vol
+          <input
+            className="click-vol-slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={project.settings.metronomeVolume}
+            disabled={!project.settings.metronomeEnabled}
+            title="Metronome click volume"
+            aria-label="Metronome volume"
+            onChange={(e) =>
+              setProject((p) =>
+                updateSettings(p, {
+                  metronomeVolume: Number(e.target.value),
+                }),
+              )
+            }
+          />
         </label>
         <div className="grid-field zoom-field" aria-label="Timeline zoom">
           <span>Zoom</span>
@@ -787,6 +1124,36 @@ export function App() {
             {zoomLabel}
           </span>
         </div>
+        <label
+          className={`grid-field follow-field${followSuspended && followPlayhead ? " suspended" : ""}`}
+          title={
+            zoom <= 1
+              ? "Follow playhead (keep preference; auto-scroll deferred)"
+              : !followPlayhead
+                ? "Follow off — check to enable"
+                : followSuspended
+                  ? "Follow preference paused by scroll — Play clears suspension"
+                  : "Follow preference on (auto-scroll during play deferred)"
+          }
+        >
+          <input
+            type="checkbox"
+            checked={followPlayhead}
+            disabled={zoom <= 1}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setFollowPlayhead(on);
+              if (on) setFollowSuspended(false);
+            }}
+            aria-label="Follow playhead"
+          />
+          Follow
+          {followSuspended && followPlayhead && zoom > 1 ? (
+            <span className="follow-paused-hint" aria-live="polite">
+              paused
+            </span>
+          ) : null}
+        </label>
         <span className="grid-hint">
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor
@@ -916,18 +1283,17 @@ export function App() {
             >
               <div className="ruler-row">
                 <div className="ruler-gutter" aria-hidden />
-                <div className="ruler">
+                <div className="ruler" data-mode={timeMode}>
                   {rulerMarks.map((t, i) => {
-                    const pct = duration > 0 ? (t / duration) * 100 : 0;
+                    const pct = timeToLanePercent(t, duration);
                     return (
                       <span
                         key={`${t}-${i}`}
                         className="ruler-mark"
                         style={{ left: `${pct}%` }}
                       >
-                        {formatAbsoluteTime(t)}
-                        <span className="ruler-musical">
-                          {formatMusicalPosition(t, project.settings)}
+                        <span className="ruler-mark-label">
+                          {formatTime(t, timeMode, project.settings)}
                         </span>
                       </span>
                     );
@@ -948,7 +1314,7 @@ export function App() {
                       className="track-lane"
                       onPointerDown={(e) => onLanePointer(e, d.id)}
                     >
-                      {idx === 0 && peaks && (
+                      {idx === 0 && waveform && (
                         <canvas ref={waveCanvasRef} className="waveform" />
                       )}
                       {gridLines.map((line, lineIdx) => (
@@ -956,23 +1322,20 @@ export function App() {
                           key={`${line.kind}-${lineIdx}-${line.t}`}
                           className={`grid-line grid-line--${line.kind}`}
                           style={{
-                            left: `${duration > 0 ? (line.t / duration) * 100 : 0}%`,
+                            left: `${timeToLanePercent(line.t, duration)}%`,
                           }}
                         />
                       ))}
                       {project.cues
                         .filter((c) => c.departmentId === d.id)
                         .map((c) => {
-                          const left =
-                            duration > 0
-                              ? `${(c.tAbs / duration) * 100}%`
-                              : "0%";
+                          const left = `${timeToLanePercent(c.tAbs, duration)}%`;
                           return (
                             <div
                               key={c.id}
                               className={`cue-marker${c.id === selectedCueId ? " selected" : ""}`}
                               style={{ left, background: d.color }}
-                              title={`${c.cueNoDept} ${c.label} · ${formatAbsoluteTime(c.tAbs)} · ${formatMusicalPosition(c.tAbs, project.settings)}`}
+                              title={`${c.cueNoDept} ${c.label} · ${formatTime(c.tAbs, timeMode, project.settings)}`}
                               onPointerDown={(e) => onCuePointerDown(e, c)}
                             />
                           );
@@ -1005,7 +1368,9 @@ export function App() {
                       seek(c.tAbs);
                     }}
                   >
-                    <span className="t">{formatAbsoluteTime(c.tAbs)}</span>
+                    <span className="t">
+                      {formatTime(c.tAbs, timeMode, project.settings)}
+                    </span>
                     <span className="label">
                       <span style={{ color: dept?.color }}>{dept?.name ?? "?"}</span>
                       {" · "}
@@ -1070,28 +1435,30 @@ export function App() {
                 />
               </label>
               <label>
-                Time (s)
+                {timeFieldLabel(timeMode)}
                 <input
-                  type="number"
-                  step={0.001}
-                  min={0}
-                  value={selectedCue.tAbs}
-                  onChange={(e) =>
-                    setProject((p) =>
-                      touchProject({
-                        ...p,
-                        cues: moveCue(
-                          p.cues,
-                          selectedCue.id,
-                          Number(e.target.value) || 0,
-                        ),
-                      }),
-                    )
+                  type="text"
+                  spellCheck={false}
+                  value={
+                    inspectorTimeDraft ??
+                    formatTime(selectedCue.tAbs, timeMode, project.settings)
                   }
+                  placeholder={timeInputPlaceholder(timeMode)}
+                  onChange={(e) => setInspectorTimeDraft(e.target.value)}
+                  onBlur={commitInspectorTime}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
                 />
               </label>
               <div className="inspector-meta">
-                Musical:{" "}
+                Abs {formatAbsoluteTime(selectedCue.tAbs)}
+                {" · "}
+                TC{" "}
+                {formatTime(selectedCue.tAbs, "timecode", project.settings)}
+                {" · "}
                 {formatMusicalPosition(selectedCue.tAbs, project.settings)}
               </div>
               <button

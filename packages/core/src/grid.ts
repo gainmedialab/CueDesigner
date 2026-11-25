@@ -1,8 +1,9 @@
 import type { GridResolution, ProjectSettings } from "./types.js";
 
-/** Quarter-note duration in seconds from BPM (standard metronome BPM). */
+/** Quarter-note duration in seconds from whole BPM (standard metronome BPM). */
 export function quarterNoteSec(bpm: number): number {
-  const safe = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
+  const raw = Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
+  const safe = Math.max(1, Math.round(raw));
   return 60 / safe;
 }
 
@@ -90,12 +91,15 @@ export function absoluteToMusical(
   const [beatsPerBar] = settings.timeSignature;
   const safeBpb = beatsPerBar > 0 ? beatsPerBar : 4;
   const relative = Math.max(0, tAbs - (settings.downbeatOffsetSec || 0));
-  const totalBeats = relative / beatSec;
-  const barIndex = Math.floor(totalBeats / safeBpb);
+  // Quantize to 1/16-beat grid so exact beat boundaries never format as *.*.3
+  // (e.g. beat 2.4 must not become 2.3.3 from float error).
+  const sixteenths = Math.round((relative / beatSec) * 4 - 1e-9);
+  const totalBeats = Math.max(0, sixteenths) / 4;
+  const barIndex = Math.floor(totalBeats / safeBpb + 1e-9);
   const beatInBar = totalBeats - barIndex * safeBpb;
-  const beat = Math.floor(beatInBar);
+  const beat = Math.floor(beatInBar + 1e-9);
   const frac = beatInBar - beat;
-  const sub = Math.min(3, Math.floor(frac * 4));
+  const sub = Math.min(3, Math.max(0, Math.round(frac * 4 - 1e-9)));
   return {
     bar: barIndex + 1,
     beat: beat + 1,
@@ -167,6 +171,41 @@ export function rulerMarkTimes(
       break;
     }
   }
+  return marksAtInterval(durationSec, interval);
+}
+
+/** Musical ruler marks at bar (and beat when dense enough) boundaries. */
+export function musicalRulerMarkTimes(
+  settings: Pick<
+    ProjectSettings,
+    "bpm" | "timeSignature" | "downbeatOffsetSec"
+  >,
+  durationSec: number,
+  contentWidthPx: number,
+  targetPx = 80,
+): number[] {
+  if (!(durationSec > 0) || !(contentWidthPx > 0)) return [];
+  const barSec = barDurationSec(settings.bpm, settings.timeSignature);
+  const beatSec = beatDurationSec(settings.bpm, settings.timeSignature);
+  if (!(barSec > 0) || !(beatSec > 0)) return [];
+  const idealSec = (targetPx / contentWidthPx) * durationSec;
+  const step = beatSec >= idealSec * 0.55 ? beatSec : barSec;
+  const origin = settings.downbeatOffsetSec || 0;
+  const marks: number[] = [];
+  const startIdx = Math.ceil((0 - origin) / step - 1e-9);
+  const endIdx = Math.floor((durationSec - origin) / step + 1e-9);
+  for (let i = startIdx; i <= endIdx; i++) {
+    const t = origin + i * step;
+    if (t < -1e-9 || t > durationSec + 1e-9) continue;
+    marks.push(Math.max(0, Math.min(durationSec, t)));
+  }
+  // Only on-grid marks (Cubase-style): do not append bare durationSec — that
+  // lands between beats and draws a label with no matching snap line.
+  if (marks.length === 0 || marks[0]! > 1e-9) marks.unshift(0);
+  return marks;
+}
+
+function marksAtInterval(durationSec: number, interval: number): number[] {
   const marks: number[] = [];
   const end = Math.ceil(durationSec / interval);
   for (let i = 0; i <= end; i++) {
