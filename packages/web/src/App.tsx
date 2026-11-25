@@ -56,7 +56,6 @@ export function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
-  const laneRef = useRef<HTMLDivElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
@@ -376,12 +375,24 @@ export function App() {
     setSelectedCueId(cue.id);
     setActiveDeptId(cue.departmentId);
     dragCueIdRef.current = cue.id;
-    const lane = laneRef.current;
+
+    // Map against the track-lane (cue % left), not .tracks (includes labels).
+    const lane = e.currentTarget.parentElement;
+    if (!lane) return;
+
+    const startRect = lane.getBoundingClientRect();
+    const startWidth = startRect.width || 1;
+    // Keep grab point relative to cue time so mousedown has zero delta.
+    const pointerTAtStart =
+      ((e.clientX - startRect.left) / startWidth) * (duration || 1);
+    const grabOffsetT = pointerTAtStart - cue.tAbs;
+
     const onMove = (ev: PointerEvent) => {
-      if (!lane || !dragCueIdRef.current) return;
+      if (!dragCueIdRef.current) return;
       const rect = lane.getBoundingClientRect();
-      const ratio = (ev.clientX - rect.left) / rect.width;
-      const t = Math.max(0, Math.min(1, ratio)) * (duration || 1);
+      const width = rect.width || 1;
+      const pointerT = ((ev.clientX - rect.left) / width) * (duration || 1);
+      const t = Math.max(0, Math.min(duration || 1, pointerT - grabOffsetT));
       setProject((p) =>
         touchProject({
           ...p,
@@ -598,7 +609,7 @@ export function App() {
                 );
               })}
           </div>
-          <div className="tracks" ref={laneRef}>
+          <div className="tracks">
             {project.departments.map((d, idx) => (
               <div className="track" key={d.id}>
                 <div className="track-label">
