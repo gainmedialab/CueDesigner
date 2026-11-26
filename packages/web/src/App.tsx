@@ -9,6 +9,7 @@ import {
   deleteDepartment,
   deleteCuesForDepartment,
   deserializeProject,
+  emptySyncStatus,
   formatAbsoluteTime,
   formatMusicalPosition,
   formatTime,
@@ -30,6 +31,7 @@ import {
   rulerMarkTimes,
   setProjectMedia,
   snapToGrid,
+  SYNC_CLOCK_SOURCES,
   TIME_DISPLAY_MODES,
   timeDisplayModeLabel,
   timeFieldLabel,
@@ -42,6 +44,8 @@ import {
   type FrameRateLabel,
   type GridResolution,
   type Project,
+  type SyncClockSource,
+  type SyncStatusSnapshot,
   type TimeDisplayMode,
 } from "@cuedesigner/core";
 import {
@@ -70,6 +74,12 @@ import {
   putProjectMedia,
 } from "./mediaStore";
 import { ExportDialog } from "./ExportDialog";
+import {
+  TC_SEEK_DRIFT_SEC,
+  TimecodeSync,
+  type LtcAudioDeviceInfo,
+  type MidiInputInfo,
+} from "./timecodeSync";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
@@ -113,8 +123,35 @@ export function App() {
   const [followSuspended, setFollowSuspended] = useState(false);
   /** Export dialog open — suspends Space/F/G/H/S/J while open; transport/Click unchanged. */
   const [exportOpen, setExportOpen] = useState(false);
+  /** Session clock source — Internal keeps HTMLMediaElement transport untouched. */
+  const [syncSource, setSyncSource] = useState<SyncClockSource>("internal");
+  const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(() =>
+    emptySyncStatus("internal"),
+  );
+  /** LTC input route — session only (devices are ephemeral). */
+  const [ltcDevices, setLtcDevices] = useState<LtcAudioDeviceInfo[]>([]);
+  const [ltcDeviceId, setLtcDeviceId] = useState<string>("");
+  const [ltcChannelIndex, setLtcChannelIndex] = useState(0);
+  const [ltcDevicesLoading, setLtcDevicesLoading] = useState(false);
+  /** MTC MIDI input — session only. */
+  const [midiInputs, setMidiInputs] = useState<MidiInputInfo[]>([]);
+  const [midiInputId, setMidiInputId] = useState<string>("");
+  const [midiInputsLoading, setMidiInputsLoading] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const syncRef = useRef<TimecodeSync | null>(null);
+  const projectClockRef = useRef({
+    fps: project.settings.fps,
+    showTcOffsetSec: project.settings.showTcOffsetSec,
+  });
+  projectClockRef.current = {
+    fps: project.settings.fps,
+    showTcOffsetSec: project.settings.showTcOffsetSec,
+  };
+  const ltcRouteRef = useRef({ deviceId: "", channelIndex: 0 });
+  ltcRouteRef.current = { deviceId: ltcDeviceId, channelIndex: ltcChannelIndex };
+  const midiRouteRef = useRef({ inputId: "" });
+  midiRouteRef.current = { inputId: midiInputId };
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -178,6 +215,17 @@ export function App() {
     const onSeeked = () => metronomeRef.current?.resync();
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("seeked", onSeeked);
+
+    const sync = new TimecodeSync({
+      getProjectFps: () => projectClockRef.current.fps,
+      getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
+      getMidiInputId: () => midiRouteRef.current.inputId || null,
+      getLtcDeviceId: () => ltcRouteRef.current.deviceId || null,
+      getLtcChannelIndex: () => ltcRouteRef.current.channelIndex,
+    });
+    syncRef.current = sync;
+    sync.onStatus((s) => setSyncStatus(s));
+
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
@@ -185,8 +233,91 @@ export function App() {
       audioRef.current = null;
       metronome.dispose();
       metronomeRef.current = null;
+      sync.dispose();
+      syncRef.current = null;
     };
   }, []);
+
+  const refreshLtcDevices = useCallback(async () => {
+    setLtcDevicesLoading(true);
+    try {
+      const devices = await TimecodeSync.listLtcAudioDevices();
+      setLtcDevices(devices);
+      const prevId = ltcRouteRef.current.deviceId;
+      const nextId =
+        prevId && devices.some((d) => d.deviceId === prevId)
+          ? prevId
+          : (devices[0]?.deviceId ?? "");
+      const selected =
+        devices.find((d) => d.deviceId === nextId) ?? devices[0];
+      const max = Math.max(1, selected?.channelCount ?? 1);
+      const nextCh = Math.min(ltcRouteRef.current.channelIndex, max - 1);
+      // Sync ref before any setSource / applyLtcRoute so getters see the route.
+      ltcRouteRef.current = { deviceId: nextId, channelIndex: nextCh };
+      setLtcDeviceId(nextId);
+      setLtcChannelIndex(nextCh);
+    } catch (err) {
+      setStatus(
+        `LTC device list failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setLtcDevicesLoading(false);
+    }
+  }, []);
+
+  const refreshMidiInputs = useCallback(async () => {
+    setMidiInputsLoading(true);
+    try {
+      const inputs = await TimecodeSync.listMidiInputs();
+      setMidiInputs(inputs);
+      const prevId = midiRouteRef.current.inputId;
+      const nextId =
+        prevId && inputs.some((i) => i.id === prevId)
+          ? prevId
+          : (inputs[0]?.id ?? "");
+      midiRouteRef.current = { inputId: nextId };
+      setMidiInputId(nextId);
+    } catch (err) {
+      setStatus(
+        `MIDI input list failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setMidiInputsLoading(false);
+    }
+  }, []);
+
+  // Switch LTC / MTC / Internal (permission prompts happen here).
+  // External sync is chase-only: pause file transport immediately on leave Internal.
+  useEffect(() => {
+    const sync = syncRef.current;
+    if (!sync) return;
+    if (syncSource === "ltc" || syncSource === "mtc") {
+      const audio = audioRef.current;
+      if (audio) audio.pause();
+      setPlaying(false);
+      metronomeRef.current?.setPlaying(false);
+    }
+    let cancelled = false;
+    void (async () => {
+      if (syncSource === "ltc") {
+        await refreshLtcDevices();
+        if (cancelled) return;
+      } else if (syncSource === "mtc") {
+        await refreshMidiInputs();
+        if (cancelled) return;
+      }
+      if (cancelled) return;
+      await sync.setSource(syncSource);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [syncSource, refreshLtcDevices, refreshMidiInputs]);
+
+  // Keep FPS-match badge in sync when project FPS / offset changes.
+  useEffect(() => {
+    syncRef.current?.refreshProjectClock();
+  }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
   // Keep metronome grid / enable / volume in sync with project settings
   useEffect(() => {
@@ -242,22 +373,43 @@ export function App() {
     return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
-  // RAF clock while playing
+  // RAF clock: Internal follows HTMLMediaElement while playing; LTC/MTC is
+  // chase-only (file stays paused) — playhead follows TC when locked/freewheel.
+  // Soft-seek paused media on drift so returning to Internal resumes at chase pos.
   useEffect(() => {
+    const external = syncSource === "ltc" || syncSource === "mtc";
     const tick = () => {
+      const sync = syncRef.current;
+      const chase = external ? sync?.sampleChase() : null;
+      if (chase) {
+        const t = chase.tAbs;
+        setCurrentTime(t);
+        const audio = audioRef.current;
+        if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+          const clamped = Math.min(Math.max(0, t), audio.duration);
+          if (Math.abs(audio.currentTime - clamped) > TC_SEEK_DRIFT_SEC) {
+            audio.currentTime = clamped;
+          }
+        }
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
       const audio = audioRef.current;
-      if (audio && playing) {
+      if (audio && playing && !external) {
         setCurrentTime(audio.currentTime);
+        rafRef.current = requestAnimationFrame(tick);
+      } else if (external) {
+        // Waiting for lock — keep RAF alive without advancing from file clock.
         rafRef.current = requestAnimationFrame(tick);
       }
     };
-    if (playing) {
+    if ((!external && playing) || external) {
       rafRef.current = requestAnimationFrame(tick);
     }
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, [playing]);
+  }, [playing, syncSource]);
 
   // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
   // Manual scroll suspends follow (checkbox stays on); programmatic scrolls are ignored.
@@ -411,9 +563,13 @@ export function App() {
     metronomeRef.current?.resync();
   }, [duration]);
 
+  const chaseOnly = syncSource === "ltc" || syncSource === "mtc";
+
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !mediaUrl) return;
+    // LTC/MTC are chase-only — never start file transport from Play/Space.
+    if (syncSource !== "internal") return;
     if (playing) {
       audio.pause();
       setPlaying(false);
@@ -431,7 +587,7 @@ export function App() {
         setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-  }, [mediaUrl, playing]);
+  }, [mediaUrl, playing, syncSource]);
 
   const togglePlayRef = useRef(togglePlay);
   togglePlayRef.current = togglePlay;
@@ -443,6 +599,8 @@ export function App() {
   seekRef.current = seek;
   const exportOpenRef = useRef(exportOpen);
   exportOpenRef.current = exportOpen;
+  const chaseOnlyRef = useRef(chaseOnly);
+  chaseOnlyRef.current = chaseOnly;
 
   // Space / F / G / H / S / J — transport / grid-bar / zoom paths.
   // Does not touch Click scheduling, MES, or lockToMediaClock.
@@ -512,9 +670,10 @@ export function App() {
       const code = e.code;
       if (code === "Space") {
         // preventDefault stops focused <button> from also synthesizing click
-        // (double toggle → Space looks dead).
+        // (double toggle → Space looks dead). Chase-only Sync ignores Space.
         e.preventDefault();
         e.stopPropagation();
+        if (chaseOnlyRef.current) return;
         void togglePlayRef.current();
         return;
       }
@@ -552,9 +711,10 @@ export function App() {
         return;
       }
       if (code === "KeyJ") {
-        // Home — seek to start (same as transport ⇤).
+        // Home — seek to start (same as transport ⇤). Chase-only: no file seek.
         e.preventDefault();
         e.stopPropagation();
+        if (chaseOnlyRef.current) return;
         seekRef.current(0);
       }
     };
@@ -973,10 +1133,20 @@ export function App() {
       </header>
 
       <div className="transport">
-        <button type="button" className="primary" onClick={togglePlay} disabled={!mediaUrl}>
+        <button
+          type="button"
+          className="primary"
+          onClick={togglePlay}
+          disabled={!mediaUrl || chaseOnly}
+          title={
+            chaseOnly
+              ? "File transport disabled while Sync is LTC/MTC (chase-only)"
+              : undefined
+          }
+        >
           {playing ? "Pause" : "Play"}
         </button>
-        <button type="button" onClick={() => seek(0)} disabled={!mediaUrl}>
+        <button type="button" onClick={() => seek(0)} disabled={!mediaUrl || chaseOnly}>
           ⇤
         </button>
         <div
@@ -1016,7 +1186,12 @@ export function App() {
           max={duration || 1}
           step={0.001}
           value={Math.min(currentTime, duration || 1)}
-          disabled={!mediaUrl}
+          disabled={!mediaUrl || chaseOnly}
+          title={
+            chaseOnly
+              ? "Scrub disabled while Sync is LTC/MTC — playhead follows TC"
+              : undefined
+          }
           onChange={(e) => seek(Number(e.target.value))}
         />
         <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
@@ -1030,6 +1205,183 @@ export function App() {
         >
           Cue at playhead
         </button>
+        <div className="sync-block" aria-label="Timecode sync source">
+          <label className="sync-source-field">
+            Sync
+            <select
+              value={syncSource}
+              title="Internal = file clock. LTC/MTC = chase-only (Play/Space disabled)."
+              aria-label="Timecode sync source"
+              onChange={(e) =>
+                setSyncSource(e.target.value as SyncClockSource)
+              }
+            >
+              {SYNC_CLOCK_SOURCES.map((src) => (
+                <option key={src} value={src}>
+                  {src === "internal"
+                    ? "Internal"
+                    : src === "ltc"
+                      ? "LTC"
+                      : "MTC"}
+                </option>
+              ))}
+            </select>
+          </label>
+          {syncSource === "ltc" ? (
+            <>
+              <label className="sync-source-field sync-ltc-device-field">
+                Device
+                <select
+                  value={ltcDeviceId}
+                  disabled={ltcDevicesLoading || ltcDevices.length === 0}
+                  title="Audio input for LTC (includes multichannel Wing / Dante / SoundGrid)"
+                  aria-label="LTC audio input device"
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    const info = ltcDevices.find((d) => d.deviceId === id);
+                    const max = Math.max(1, info?.channelCount ?? 1);
+                    const ch = Math.min(ltcChannelIndex, max - 1);
+                    ltcRouteRef.current = { deviceId: id, channelIndex: ch };
+                    setLtcDeviceId(id);
+                    setLtcChannelIndex(ch);
+                    void syncRef.current?.applyLtcRoute();
+                  }}
+                >
+                  {ltcDevices.length === 0 ? (
+                    <option value="">
+                      {ltcDevicesLoading ? "Scanning…" : "No inputs"}
+                    </option>
+                  ) : (
+                    ltcDevices.map((d) => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label} ({d.channelCount} ch)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="sync-source-field">
+                Ch
+                <select
+                  value={ltcChannelIndex}
+                  disabled={ltcDevicesLoading || ltcDevices.length === 0}
+                  title="Input channel carrying LTC (1-based in the label)"
+                  aria-label="LTC input channel"
+                  onChange={(e) => {
+                    const ch = Number(e.target.value);
+                    ltcRouteRef.current = {
+                      deviceId: ltcDeviceId,
+                      channelIndex: ch,
+                    };
+                    setLtcChannelIndex(ch);
+                    void syncRef.current?.applyLtcRoute();
+                  }}
+                >
+                  {Array.from(
+                    {
+                      length: Math.max(
+                        1,
+                        ltcDevices.find((d) => d.deviceId === ltcDeviceId)
+                          ?.channelCount ?? 1,
+                      ),
+                    },
+                    (_, i) => (
+                      <option key={i} value={i}>
+                        {i + 1}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="sync-refresh-btn"
+                disabled={ltcDevicesLoading}
+                title="Re-enumerate audio inputs and channel counts"
+                onClick={() => {
+                  void (async () => {
+                    await refreshLtcDevices();
+                    void syncRef.current?.applyLtcRoute();
+                  })();
+                }}
+              >
+                {ltcDevicesLoading ? "…" : "↻"}
+              </button>
+            </>
+          ) : null}
+          {syncSource === "mtc" ? (
+            <>
+              <label className="sync-source-field sync-ltc-device-field">
+                MIDI
+                <select
+                  value={midiInputId}
+                  disabled={midiInputsLoading || midiInputs.length === 0}
+                  title="MIDI input port for MTC (IAC, USB interface, desk)"
+                  aria-label="MTC MIDI input"
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    midiRouteRef.current = { inputId: id };
+                    setMidiInputId(id);
+                    void syncRef.current?.applyMtcRoute();
+                  }}
+                >
+                  {midiInputs.length === 0 ? (
+                    <option value="">
+                      {midiInputsLoading ? "Scanning…" : "No MIDI inputs"}
+                    </option>
+                  ) : (
+                    midiInputs.map((i) => (
+                      <option key={i.id} value={i.id}>
+                        {i.manufacturer
+                          ? `${i.name} (${i.manufacturer})`
+                          : i.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="sync-refresh-btn"
+                disabled={midiInputsLoading}
+                title="Re-enumerate MIDI inputs"
+                onClick={() => {
+                  void (async () => {
+                    await refreshMidiInputs();
+                    void syncRef.current?.applyMtcRoute();
+                  })();
+                }}
+              >
+                {midiInputsLoading ? "…" : "↻"}
+              </button>
+            </>
+          ) : null}
+          <span
+            className={`sync-status sync-lock-${syncStatus.lock}${
+              syncStatus.fpsMatch ? "" : " sync-fps-mismatch"
+            }`}
+            title={syncStatus.detail}
+          >
+            <span className="sync-lock-dot" aria-hidden />
+            <span className="sync-lock-label">
+              {syncSource === "internal"
+                ? "Internal"
+                : syncStatus.lock === "locked"
+                  ? "Locked"
+                  : syncStatus.lock === "freewheel"
+                    ? "Freewheel"
+                    : syncStatus.lock === "locking"
+                      ? "Locking"
+                      : "Unlocked"}
+            </span>
+            {syncStatus.tcDisplay ? (
+              <span className="sync-tc">{syncStatus.tcDisplay}</span>
+            ) : null}
+            {!syncStatus.fpsMatch ? (
+              <span className="sync-fps-warn">FPS≠</span>
+            ) : null}
+          </span>
+        </div>
       </div>
 
       <div className="grid-bar" aria-label="BPM and snap settings">
@@ -1294,7 +1646,7 @@ export function App() {
         <span className="grid-hint">
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
-          <kbd>Space</kbd> play/pause · <kbd>F</kbd> follow ·{" "}
+          <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
           <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
           <kbd>S</kbd> snap · <kbd>J</kbd> home
         </span>

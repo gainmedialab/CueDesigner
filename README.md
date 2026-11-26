@@ -108,7 +108,23 @@ Transport **Abs / TC / Mus** switches the clock, timeline ruler, cue list, and i
 
 Canonical storage remains **file-relative absolute seconds** (`cue.tAbs`). Editing in any mode parses back to absolute; the inspector also shows Abs · TC · musical as a cross-check.
 
-Live LTC/MTC I/O hardware remains deferred; **file exports** ship in Phase 1 (below).
+## Live timecode sync (LTC / MTC chase)
+
+Transport **Sync** selects the show clock source:
+
+| Source | Path | Notes |
+|--------|------|--------|
+| **Internal** | HTMLMediaElement file clock | Default. Smooth Play/Pause/Space/scrub; Click metronome unchanged. |
+| **LTC** | Web Audio `getUserMedia` / `enumerateDevices` → bi-phase LTC decode | **Chase-only.** Pick **Device** + **Ch** (probes channel counts for multichannel Wing / Dante / SoundGrid / aggregates). LTC is not monitored to speakers. |
+| **MTC** | Web MIDI quarter-frame + full-frame SysEx | **Chase-only.** Pick **MIDI** input port (IAC / USB / desk); **↻** re-scans. |
+
+**Chase-only rules (LTC/MTC):** switching away from Internal **pauses** file audio immediately. **Play / Pause / Space** (and scrub / home) are disabled — the playhead follows decoded show TC minus **TC offset** when **Locked** (or briefly **Freewheel** over dropouts). Unlocked external sources hold the last playhead (no file transport). Soft-seek keeps paused media aligned so returning to Internal resumes at the chase position. **FPS≠** warns when the stream rate disagrees with project **FPS**.
+
+**LTC device picker:** Sync → LTC requests permission, enumerates `audioinput` devices, and probes each with `channelCount: { ideal: 64 }` plus `getCapabilities` / `getSettings` so high channel-count interfaces show as e.g. `Dante Virtual Soundcard (64 ch)`. Choose the channel that carries LTC (desk LTC out, console card, etc.). **↻** re-scans after hot-plug.
+
+**MTC MIDI picker:** Sync → MTC requests Web MIDI access, lists input ports (`requestMIDIAccess` → `inputs`), and binds the selected port for quarter-frame / full-frame SysEx. Use an IAC loopback or a USB MIDI interface from the desk. **↻** re-scans after hot-plug.
+
+No native Electron MIDI addon in this slice — Chromium Web MIDI + Web Audio cover Mac-first desktop and web. Generate/outgoing TC remains later.
 
 ## Show exports (export-only)
 
