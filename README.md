@@ -114,11 +114,11 @@ Transport **Sync** selects the show clock source:
 
 | Source | Path | Notes |
 |--------|------|--------|
-| **Internal** | HTMLMediaElement file clock | Default. Smooth play/scrub; Click metronome unchanged. |
-| **LTC** | Web Audio `getUserMedia` → bi-phase LTC decode | Grant mic/line permission; feed LTC into the chosen input (not monitored to speakers). |
-| **MTC** | Web MIDI quarter-frame + full-frame SysEx | Uses the first available MIDI input (Electron/Chromium). |
+| **Internal** | HTMLMediaElement file clock | Default. Smooth Play/Pause/Space/scrub; Click metronome unchanged. |
+| **LTC** | Web Audio `getUserMedia` → bi-phase LTC decode | **Chase-only.** Grant mic/line permission; feed LTC into the chosen input (not monitored to speakers). |
+| **MTC** | Web MIDI quarter-frame + full-frame SysEx | **Chase-only.** Uses the first available MIDI input (Electron/Chromium). |
 
-When **Locked** (or briefly **Freewheel** over dropouts), the playhead follows decoded show TC minus **TC offset**. Media is seeked only if drift > ~50 ms so Internal mode stays smooth. **FPS≠** warns when the stream rate disagrees with project **FPS**. Unlocked external sources fall back to the internal file clock.
+**Chase-only rules (LTC/MTC):** switching away from Internal **pauses** file audio immediately. **Play / Pause / Space** (and scrub / home) are disabled — the playhead follows decoded show TC minus **TC offset** when **Locked** (or briefly **Freewheel** over dropouts). Unlocked external sources hold the last playhead (no file transport). Soft-seek keeps paused media aligned so returning to Internal resumes at the chase position. **FPS≠** warns when the stream rate disagrees with project **FPS**.
 
 No native Electron MIDI addon in this slice — Chromium Web MIDI + Web Audio cover Mac-first desktop and web. Generate/outgoing TC remains later.
 

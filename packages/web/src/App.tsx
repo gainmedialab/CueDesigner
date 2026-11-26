@@ -218,9 +218,16 @@ export function App() {
   }, []);
 
   // Switch LTC / MTC / Internal (permission prompts happen here).
+  // External sync is chase-only: pause file transport immediately on leave Internal.
   useEffect(() => {
     const sync = syncRef.current;
     if (!sync) return;
+    if (syncSource === "ltc" || syncSource === "mtc") {
+      const audio = audioRef.current;
+      if (audio) audio.pause();
+      setPlaying(false);
+      metronomeRef.current?.setPlaying(false);
+    }
     void sync.setSource(syncSource);
   }, [syncSource]);
 
@@ -283,11 +290,11 @@ export function App() {
     return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
-  // RAF clock: Internal follows HTMLMediaElement while playing; LTC/MTC chase
-  // drives the playhead when locked/freewheel and only seeks media on drift.
+  // RAF clock: Internal follows HTMLMediaElement while playing; LTC/MTC is
+  // chase-only (file stays paused) — playhead follows TC when locked/freewheel.
+  // Soft-seek paused media on drift so returning to Internal resumes at chase pos.
   useEffect(() => {
-    const external =
-      syncSource === "ltc" || syncSource === "mtc";
+    const external = syncSource === "ltc" || syncSource === "mtc";
     const tick = () => {
       const sync = syncRef.current;
       const chase = external ? sync?.sampleChase() : null;
@@ -299,19 +306,21 @@ export function App() {
           const clamped = Math.min(Math.max(0, t), audio.duration);
           if (Math.abs(audio.currentTime - clamped) > TC_SEEK_DRIFT_SEC) {
             audio.currentTime = clamped;
-            metronomeRef.current?.resync();
           }
         }
         rafRef.current = requestAnimationFrame(tick);
         return;
       }
       const audio = audioRef.current;
-      if (audio && playing) {
+      if (audio && playing && !external) {
         setCurrentTime(audio.currentTime);
+        rafRef.current = requestAnimationFrame(tick);
+      } else if (external) {
+        // Waiting for lock — keep RAF alive without advancing from file clock.
         rafRef.current = requestAnimationFrame(tick);
       }
     };
-    if (playing || external) {
+    if ((!external && playing) || external) {
       rafRef.current = requestAnimationFrame(tick);
     }
     return () => {
@@ -471,9 +480,13 @@ export function App() {
     metronomeRef.current?.resync();
   }, [duration]);
 
+  const chaseOnly = syncSource === "ltc" || syncSource === "mtc";
+
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !mediaUrl) return;
+    // LTC/MTC are chase-only — never start file transport from Play/Space.
+    if (syncSource !== "internal") return;
     if (playing) {
       audio.pause();
       setPlaying(false);
@@ -491,7 +504,7 @@ export function App() {
         setStatus(`Playback failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-  }, [mediaUrl, playing]);
+  }, [mediaUrl, playing, syncSource]);
 
   const togglePlayRef = useRef(togglePlay);
   togglePlayRef.current = togglePlay;
@@ -503,6 +516,8 @@ export function App() {
   seekRef.current = seek;
   const exportOpenRef = useRef(exportOpen);
   exportOpenRef.current = exportOpen;
+  const chaseOnlyRef = useRef(chaseOnly);
+  chaseOnlyRef.current = chaseOnly;
 
   // Space / F / G / H / S / J — transport / grid-bar / zoom paths.
   // Does not touch Click scheduling, MES, or lockToMediaClock.
@@ -572,9 +587,10 @@ export function App() {
       const code = e.code;
       if (code === "Space") {
         // preventDefault stops focused <button> from also synthesizing click
-        // (double toggle → Space looks dead).
+        // (double toggle → Space looks dead). Chase-only Sync ignores Space.
         e.preventDefault();
         e.stopPropagation();
+        if (chaseOnlyRef.current) return;
         void togglePlayRef.current();
         return;
       }
@@ -612,9 +628,10 @@ export function App() {
         return;
       }
       if (code === "KeyJ") {
-        // Home — seek to start (same as transport ⇤).
+        // Home — seek to start (same as transport ⇤). Chase-only: no file seek.
         e.preventDefault();
         e.stopPropagation();
+        if (chaseOnlyRef.current) return;
         seekRef.current(0);
       }
     };
@@ -1033,10 +1050,20 @@ export function App() {
       </header>
 
       <div className="transport">
-        <button type="button" className="primary" onClick={togglePlay} disabled={!mediaUrl}>
+        <button
+          type="button"
+          className="primary"
+          onClick={togglePlay}
+          disabled={!mediaUrl || chaseOnly}
+          title={
+            chaseOnly
+              ? "File transport disabled while Sync is LTC/MTC (chase-only)"
+              : undefined
+          }
+        >
           {playing ? "Pause" : "Play"}
         </button>
-        <button type="button" onClick={() => seek(0)} disabled={!mediaUrl}>
+        <button type="button" onClick={() => seek(0)} disabled={!mediaUrl || chaseOnly}>
           ⇤
         </button>
         <div
@@ -1076,7 +1103,12 @@ export function App() {
           max={duration || 1}
           step={0.001}
           value={Math.min(currentTime, duration || 1)}
-          disabled={!mediaUrl}
+          disabled={!mediaUrl || chaseOnly}
+          title={
+            chaseOnly
+              ? "Scrub disabled while Sync is LTC/MTC — playhead follows TC"
+              : undefined
+          }
           onChange={(e) => seek(Number(e.target.value))}
         />
         <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
@@ -1095,7 +1127,7 @@ export function App() {
             Sync
             <select
               value={syncSource}
-              title="Clock source: Internal file clock, LTC (audio), or MTC (MIDI)"
+              title="Internal = file clock. LTC/MTC = chase-only (Play/Space disabled)."
               aria-label="Timecode sync source"
               onChange={(e) =>
                 setSyncSource(e.target.value as SyncClockSource)
@@ -1402,7 +1434,7 @@ export function App() {
         <span className="grid-hint">
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
-          <kbd>Space</kbd> play/pause · <kbd>F</kbd> follow ·{" "}
+          <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
           <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
           <kbd>S</kbd> snap · <kbd>J</kbd> home
         </span>
