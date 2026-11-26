@@ -432,10 +432,14 @@ export function App() {
 
   const togglePlayRef = useRef(togglePlay);
   togglePlayRef.current = togglePlay;
+  const zoomAroundPlayheadRef = useRef(zoomAroundPlayhead);
+  zoomAroundPlayheadRef.current = zoomAroundPlayhead;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
   const seekRef = useRef(seek);
   seekRef.current = seek;
 
-  // Space / F / G / H — same paths as transport / grid-bar controls.
+  // Space / F / G / H / S / J — transport / grid-bar / zoom paths.
   // Does not touch Click scheduling, MES, or lockToMediaClock.
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
@@ -511,6 +515,21 @@ export function App() {
         return;
       }
       if (code === "KeyG") {
+        // Zoom out around playhead — same as − button.
+        e.preventDefault();
+        e.stopPropagation();
+        zoomAroundPlayheadRef.current(zoomRef.current / ZOOM_STEP);
+        return;
+      }
+      if (code === "KeyH") {
+        // Zoom in around playhead — same as + button.
+        e.preventDefault();
+        e.stopPropagation();
+        zoomAroundPlayheadRef.current(zoomRef.current * ZOOM_STEP);
+        return;
+      }
+      if (code === "KeyS") {
+        // Magnetic snap toggle — same as checkbox.
         e.preventDefault();
         e.stopPropagation();
         setProject((p) =>
@@ -518,8 +537,8 @@ export function App() {
         );
         return;
       }
-      if (code === "KeyH") {
-        // Home to start — same as transport ⇤.
+      if (code === "KeyJ") {
+        // Home — seek to start (same as transport ⇤).
         e.preventDefault();
         e.stopPropagation();
         seekRef.current(0);
@@ -1259,7 +1278,8 @@ export function App() {
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
           <kbd>Space</kbd> play/pause · <kbd>F</kbd> follow ·{" "}
-          <kbd>G</kbd> snap · <kbd>H</kbd> home
+          <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
+          <kbd>S</kbd> snap · <kbd>J</kbd> home
         </span>
       </div>
 
