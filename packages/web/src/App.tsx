@@ -69,6 +69,7 @@ import {
   getProjectMedia,
   putProjectMedia,
 } from "./mediaStore";
+import { ExportDialog } from "./ExportDialog";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
@@ -110,6 +111,8 @@ export function App() {
   const [followPlayhead, setFollowPlayhead] = useState(true);
   /** Temporary pause after manual scroll; cleared on Play or re-checking Follow. */
   const [followSuspended, setFollowSuspended] = useState(false);
+  /** Export dialog open — suspends Space/F/G/H/S/J while open; transport/Click unchanged. */
+  const [exportOpen, setExportOpen] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
@@ -438,6 +441,8 @@ export function App() {
   zoomRef.current = zoom;
   const seekRef = useRef(seek);
   seekRef.current = seek;
+  const exportOpenRef = useRef(exportOpen);
+  exportOpenRef.current = exportOpen;
 
   // Space / F / G / H / S / J — transport / grid-bar / zoom paths.
   // Does not touch Click scheduling, MES, or lockToMediaClock.
@@ -492,6 +497,15 @@ export function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.repeat) return;
+      // Suspend transport shortcuts while Export dialog is open (Escape closes).
+      if (exportOpenRef.current) {
+        if (e.code === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          setExportOpen(false);
+        }
+        return;
+      }
       if (isTextEntryTarget(e.target)) return;
 
       // Prefer e.code so layout / modifiers don't break letter matching.
@@ -930,6 +944,9 @@ export function App() {
           </button>
           <button type="button" onClick={onSaveProject}>
             Save
+          </button>
+          <button type="button" onClick={() => setExportOpen(true)}>
+            Export
           </button>
           <button
             type="button"
@@ -1629,6 +1646,13 @@ export function App() {
           pyrotechnic or SFX hardware.
         </span>
       </footer>
+
+      <ExportDialog
+        project={project}
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        onStatus={setStatus}
+      />
     </div>
   );
 }

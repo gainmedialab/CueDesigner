@@ -108,7 +108,23 @@ Transport **Abs / TC / Mus** switches the clock, timeline ruler, cue list, and i
 
 Canonical storage remains **file-relative absolute seconds** (`cue.tAbs`). Editing in any mode parses back to absolute; the inspector also shows Abs · TC · musical as a cross-check.
 
-Live LTC/MTC I/O hardware and export packs are deferred.
+Live LTC/MTC I/O hardware remains deferred; **file exports** ship in Phase 1 (below).
+
+## Show exports (export-only)
+
+Use the top-bar **Export** button. Downloads stay on the machine (browser download / Electron). No bidirectional sync and no live desk GO.
+
+| Format | File | Console / controller ingest |
+|--------|------|------------------------------|
+| **MagicQ cuelist CSV** | `*_MagicQ.csv` | Reaper-style markers (`#,Name,Start,…`). Cue Stack → **TC View** → **Import TC Timings** → Make Cues. Match MagicQ frame type to project **FPS**. |
+| **grandMA3 macro + TC** | `*_grandMA3_macro.xml` | Import into Macros pool and run once. Scaffolds DataPool sequences (one per department), empty cues, and timecode Goto events. Looks stay on the desk. Set sequence / timecode pool slots in the dialog. |
+| **grandMA2 TC CSV** | `*_grandMA2_TC.csv` | Best-effort Reaper-style TC CSV for MA2 plugin / marker workflows. Prefer the MA3 macro when available. |
+| **SFX / Finale CSV** | `*_SFX_Finale.csv` | Tab-delimited Finale firing-script CSV (event time, prefire, module/pin, label) for FireControl G3–style import. Optional cue `fields`: `prefireSec`, `module`/`rail`, `pin`, `position`, `hazard`. |
+| **Generic CSV / TAB** | `*_cues.csv` / `*_cues.tsv` | Neutral columns: dept, cue no, abs / show TC / musical, fade, note, BPM, FPS. |
+
+Dialog options: multi-format select, department filter, optional one-file-per-department (MagicQ / MA2). Pyro/SFX exports require an acknowledgement checkbox — planning data only; the app does not arm or fire hardware.
+
+**How to test (quick):** New project → import audio → place a few cues on Lighting + Pyro/SFX → set FPS / TC offset → **Export** → download MagicQ + grandMA3 + SFX + Generic → open CSVs in a text editor; confirm TC times match Show TC mode; import MagicQ CSV on a MagicQ PC (Import TC Timings); import the MA3 XML macro on grandMA3 onPC and run it into an empty range.
 
 ## Save / Open and media (offline-first)
 
