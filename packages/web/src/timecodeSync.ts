@@ -28,11 +28,26 @@ export const TC_SEEK_DRIFT_SEC = 0.05;
 
 export type TimecodeSyncListener = (status: SyncStatusSnapshot) => void;
 
+/** Audio input for LTC — includes high channel-count interfaces (Wing, Dante, SoundGrid…). */
+export interface LtcAudioDeviceInfo {
+  deviceId: string;
+  label: string;
+  /** Max input channels probed via getUserMedia / getCapabilities (1…N). */
+  channelCount: number;
+}
+
+/** Ideal channelCount request so Chromium opens multichannel devices fully. */
+export const LTC_CHANNEL_COUNT_IDEAL = 64;
+
 export interface TimecodeSyncOptions {
   getProjectFps: () => FrameRateLabel;
   getShowTcOffsetSec: () => number;
   /** Optional preferred MIDI input id (Web MIDI). */
   midiInputId?: string | null;
+  /** Preferred audioinput deviceId for LTC (empty = default). */
+  getLtcDeviceId?: () => string | null;
+  /** 0-based input channel index for LTC decode. */
+  getLtcChannelIndex?: () => number;
 }
 
 export interface TimecodeChaseSample {
@@ -69,6 +84,8 @@ export class TimecodeSync {
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private processor: ScriptProcessorNode | null = null;
   private ltcDecoder: LtcAudioDecoder | null = null;
+  private ltcChannelIndex = 0;
+  private ltcStreamChannelCount = 1;
 
   constructor(opts: TimecodeSyncOptions) {
     this.opts = opts;
@@ -156,6 +173,40 @@ export class TimecodeSync {
   dispose(): void {
     void this.setSource("internal");
     this.listener = null;
+  }
+
+  /**
+   * Restart LTC capture after the user picks a different device or input channel.
+   * No-op unless Sync source is already LTC.
+   */
+  async applyLtcRoute(): Promise<void> {
+    if (this.source !== "ltc") return;
+    await this.stopIo();
+    this.resetLock();
+    this.emit({
+      ...emptySyncStatus("ltc"),
+      detail: "Opening LTC input…",
+    });
+    try {
+      await this.startLtc();
+      this.startWatchdog();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.emit({
+        source: "ltc",
+        lock: "unlocked",
+        tc: null,
+        tcDisplay: null,
+        fpsMatch: true,
+        detail: msg,
+        lastFrameAtMs: null,
+      });
+    }
+  }
+
+  /** Active LTC stream channel count (after open), or 1. */
+  getLtcStreamChannelCount(): number {
+    return this.ltcStreamChannelCount;
   }
 
   // --- Internal helpers ------------------------------------------------------
@@ -358,22 +409,76 @@ export class TimecodeSync {
     }
   }
 
+  /**
+   * Enumerate audioinput devices and probe max channelCount so multichannel
+   * desks/interfaces (Wing, Dante, SoundGrid, aggregates) appear with full ch counts.
+   * Requests mic permission once, then opens each device briefly.
+   */
+  static async listLtcAudioDevices(): Promise<LtcAudioDeviceInfo[]> {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
+    // Labels + capabilities require a prior permission grant.
+    try {
+      const warm = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+      for (const t of warm.getTracks()) t.stop();
+    } catch {
+      // Still try enumerate — may only get truncated ids without labels.
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === "audioinput");
+    const out: LtcAudioDeviceInfo[] = [];
+
+    for (const d of inputs) {
+      const channelCount = await probeInputChannelCount(d.deviceId);
+      out.push({
+        deviceId: d.deviceId,
+        label: d.label || `Audio input (${d.deviceId.slice(0, 8)}…)`,
+        channelCount,
+      });
+    }
+    return out;
+  }
+
   // --- LTC -------------------------------------------------------------------
 
   private async startLtc(): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Audio capture unavailable in this browser");
     }
+    const deviceId = this.opts.getLtcDeviceId?.() || null;
+    const wantCh = Math.max(0, Math.floor(this.opts.getLtcChannelIndex?.() ?? 0));
+    this.ltcChannelIndex = wantCh;
+
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        // Request a high channel count so Dante/Wing/SoundGrid open multichannel.
+        channelCount: {
+          ideal: Math.max(LTC_CHANNEL_COUNT_IDEAL, wantCh + 1),
+          min: 1,
+        },
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
-        channelCount: 1,
       },
       video: false,
     });
     this.mediaStream = stream;
+
+    const track = stream.getAudioTracks()[0];
+    const settingsCh = track?.getSettings?.().channelCount;
+    const capsMax = trackCapabilitiesMaxChannels(track);
+    const streamCh = Math.max(
+      1,
+      capsMax ?? 0,
+      typeof settingsCh === "number" ? settingsCh : 0,
+      wantCh + 1,
+    );
+    this.ltcStreamChannelCount = streamCh;
+    this.ltcChannelIndex = Math.min(wantCh, streamCh - 1);
 
     const AC =
       window.AudioContext ||
@@ -387,8 +492,23 @@ export class TimecodeSync {
     if (ctx.state === "suspended") await ctx.resume();
 
     const src = ctx.createMediaStreamSource(stream);
+    // Prefer explicit multichannel so ChannelSplitter sees Dante/Wing/SoundGrid counts.
+    try {
+      src.channelCount = streamCh;
+      src.channelCountMode = "explicit";
+      src.channelInterpretation = "discrete";
+    } catch {
+      // Some builds reject explicit channelCount — splitter still works with defaults.
+    }
     this.sourceNode = src;
-    // ScriptProcessor is deprecated but widely available; AudioWorklet can replace later.
+
+    const splitter = ctx.createChannelSplitter(streamCh);
+    const tap = ctx.createGain();
+    tap.gain.value = 1;
+    src.connect(splitter);
+    splitter.connect(tap, this.ltcChannelIndex);
+
+    // Mono ScriptProcessor on the selected channel only (never monitored to FOH).
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     this.processor = processor;
     const fps = frameRateApprox(this.opts.getProjectFps());
@@ -398,24 +518,93 @@ export class TimecodeSync {
       const frames = this.ltcDecoder!.pushSamples(input);
       const now = performance.now();
       for (const f of frames) this.acceptFrame(f, now);
-      // Keep graph alive; mute output so LTC is never monitored to speakers.
       e.outputBuffer.getChannelData(0).fill(0);
     };
-    src.connect(processor);
+    tap.connect(processor);
     processor.connect(ctx.destination);
 
-    const trackLabel =
-      stream.getAudioTracks()[0]?.label || "Default audio input";
+    const trackLabel = track?.label || "Default audio input";
+    const chLabel = this.ltcChannelIndex + 1;
     this.emit({
       source: "ltc",
       lock: "unlocked",
       tc: null,
       tcDisplay: null,
       fpsMatch: true,
-      detail: `Listening: ${trackLabel}`,
+      detail: `Listening: ${trackLabel} · Ch ${chLabel}/${streamCh}`,
       lastFrameAtMs: null,
     });
   }
+}
+
+/** Probe max channels for one audioinput deviceId (opens stream briefly). */
+async function probeInputChannelCount(deviceId: string): Promise<number> {
+  if (!navigator.mediaDevices?.getUserMedia) return 1;
+  let stream: MediaStream | null = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: { exact: deviceId },
+        channelCount: { ideal: LTC_CHANNEL_COUNT_IDEAL, min: 1 },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+      video: false,
+    });
+    const track = stream.getAudioTracks()[0];
+    const capsMax = trackCapabilitiesMaxChannels(track);
+    const settingsCh = track?.getSettings?.().channelCount;
+    // Also ask the Web Audio graph — some drivers only expose count there.
+    let graphCh = 0;
+    try {
+      const AC =
+        window.AudioContext ||
+        (
+          window as unknown as {
+            webkitAudioContext: typeof AudioContext;
+          }
+        ).webkitAudioContext;
+      const ctx = new AC();
+      const src = ctx.createMediaStreamSource(stream);
+      graphCh = src.channelCount || 0;
+      src.disconnect();
+      await ctx.close();
+    } catch {
+      // ignore
+    }
+    return Math.max(
+      1,
+      capsMax ?? 0,
+      typeof settingsCh === "number" ? settingsCh : 0,
+      graphCh,
+    );
+  } catch {
+    return 2; // safe stereo fallback when probe fails
+  } finally {
+    if (stream) {
+      for (const t of stream.getTracks()) t.stop();
+    }
+  }
+}
+
+function trackCapabilitiesMaxChannels(
+  track: MediaStreamTrack | undefined,
+): number | null {
+  if (!track || typeof track.getCapabilities !== "function") return null;
+  try {
+    const caps = track.getCapabilities() as {
+      channelCount?: number | { max?: number; min?: number };
+    };
+    const cc = caps.channelCount;
+    if (typeof cc === "number" && cc > 0) return cc;
+    if (cc && typeof cc === "object" && typeof cc.max === "number") {
+      return cc.max > 0 ? cc.max : null;
+    }
+  } catch {
+    // getCapabilities can throw on some builds
+  }
+  return null;
 }
 
 function frameRateApprox(label: FrameRateLabel): number {

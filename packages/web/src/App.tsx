@@ -74,7 +74,11 @@ import {
   putProjectMedia,
 } from "./mediaStore";
 import { ExportDialog } from "./ExportDialog";
-import { TC_SEEK_DRIFT_SEC, TimecodeSync } from "./timecodeSync";
+import {
+  TC_SEEK_DRIFT_SEC,
+  TimecodeSync,
+  type LtcAudioDeviceInfo,
+} from "./timecodeSync";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
@@ -123,6 +127,11 @@ export function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(() =>
     emptySyncStatus("internal"),
   );
+  /** LTC input route — session only (devices are ephemeral). */
+  const [ltcDevices, setLtcDevices] = useState<LtcAudioDeviceInfo[]>([]);
+  const [ltcDeviceId, setLtcDeviceId] = useState<string>("");
+  const [ltcChannelIndex, setLtcChannelIndex] = useState(0);
+  const [ltcDevicesLoading, setLtcDevicesLoading] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -134,6 +143,8 @@ export function App() {
     fps: project.settings.fps,
     showTcOffsetSec: project.settings.showTcOffsetSec,
   };
+  const ltcRouteRef = useRef({ deviceId: "", channelIndex: 0 });
+  ltcRouteRef.current = { deviceId: ltcDeviceId, channelIndex: ltcChannelIndex };
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -201,6 +212,8 @@ export function App() {
     const sync = new TimecodeSync({
       getProjectFps: () => projectClockRef.current.fps,
       getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
+      getLtcDeviceId: () => ltcRouteRef.current.deviceId || null,
+      getLtcChannelIndex: () => ltcRouteRef.current.channelIndex,
     });
     syncRef.current = sync;
     sync.onStatus((s) => setSyncStatus(s));
@@ -217,6 +230,33 @@ export function App() {
     };
   }, []);
 
+  const refreshLtcDevices = useCallback(async () => {
+    setLtcDevicesLoading(true);
+    try {
+      const devices = await TimecodeSync.listLtcAudioDevices();
+      setLtcDevices(devices);
+      const prevId = ltcRouteRef.current.deviceId;
+      const nextId =
+        prevId && devices.some((d) => d.deviceId === prevId)
+          ? prevId
+          : (devices[0]?.deviceId ?? "");
+      const selected =
+        devices.find((d) => d.deviceId === nextId) ?? devices[0];
+      const max = Math.max(1, selected?.channelCount ?? 1);
+      const nextCh = Math.min(ltcRouteRef.current.channelIndex, max - 1);
+      // Sync ref before any setSource / applyLtcRoute so getters see the route.
+      ltcRouteRef.current = { deviceId: nextId, channelIndex: nextCh };
+      setLtcDeviceId(nextId);
+      setLtcChannelIndex(nextCh);
+    } catch (err) {
+      setStatus(
+        `LTC device list failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setLtcDevicesLoading(false);
+    }
+  }, []);
+
   // Switch LTC / MTC / Internal (permission prompts happen here).
   // External sync is chase-only: pause file transport immediately on leave Internal.
   useEffect(() => {
@@ -228,8 +268,19 @@ export function App() {
       setPlaying(false);
       metronomeRef.current?.setPlaying(false);
     }
-    void sync.setSource(syncSource);
-  }, [syncSource]);
+    let cancelled = false;
+    void (async () => {
+      if (syncSource === "ltc") {
+        await refreshLtcDevices();
+        if (cancelled) return;
+      }
+      if (cancelled) return;
+      await sync.setSource(syncSource);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [syncSource, refreshLtcDevices]);
 
   // Keep FPS-match badge in sync when project FPS / offset changes.
   useEffect(() => {
@@ -1144,6 +1195,88 @@ export function App() {
               ))}
             </select>
           </label>
+          {syncSource === "ltc" ? (
+            <>
+              <label className="sync-source-field sync-ltc-device-field">
+                Device
+                <select
+                  value={ltcDeviceId}
+                  disabled={ltcDevicesLoading || ltcDevices.length === 0}
+                  title="Audio input for LTC (includes multichannel Wing / Dante / SoundGrid)"
+                  aria-label="LTC audio input device"
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    const info = ltcDevices.find((d) => d.deviceId === id);
+                    const max = Math.max(1, info?.channelCount ?? 1);
+                    const ch = Math.min(ltcChannelIndex, max - 1);
+                    ltcRouteRef.current = { deviceId: id, channelIndex: ch };
+                    setLtcDeviceId(id);
+                    setLtcChannelIndex(ch);
+                    void syncRef.current?.applyLtcRoute();
+                  }}
+                >
+                  {ltcDevices.length === 0 ? (
+                    <option value="">
+                      {ltcDevicesLoading ? "Scanning…" : "No inputs"}
+                    </option>
+                  ) : (
+                    ltcDevices.map((d) => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label} ({d.channelCount} ch)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="sync-source-field">
+                Ch
+                <select
+                  value={ltcChannelIndex}
+                  disabled={ltcDevicesLoading || ltcDevices.length === 0}
+                  title="Input channel carrying LTC (1-based in the label)"
+                  aria-label="LTC input channel"
+                  onChange={(e) => {
+                    const ch = Number(e.target.value);
+                    ltcRouteRef.current = {
+                      deviceId: ltcDeviceId,
+                      channelIndex: ch,
+                    };
+                    setLtcChannelIndex(ch);
+                    void syncRef.current?.applyLtcRoute();
+                  }}
+                >
+                  {Array.from(
+                    {
+                      length: Math.max(
+                        1,
+                        ltcDevices.find((d) => d.deviceId === ltcDeviceId)
+                          ?.channelCount ?? 1,
+                      ),
+                    },
+                    (_, i) => (
+                      <option key={i} value={i}>
+                        {i + 1}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="sync-refresh-btn"
+                disabled={ltcDevicesLoading}
+                title="Re-enumerate audio inputs and channel counts"
+                onClick={() => {
+                  void (async () => {
+                    await refreshLtcDevices();
+                    void syncRef.current?.applyLtcRoute();
+                  })();
+                }}
+              >
+                {ltcDevicesLoading ? "…" : "↻"}
+              </button>
+            </>
+          ) : null}
           <span
             className={`sync-status sync-lock-${syncStatus.lock}${
               syncStatus.fpsMatch ? "" : " sync-fps-mismatch"

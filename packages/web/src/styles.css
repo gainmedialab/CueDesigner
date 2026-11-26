@@ -207,9 +207,11 @@ input[type="color"] {
 .sync-block {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.55rem;
   margin-left: 0.25rem;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .sync-source-field {
@@ -226,6 +228,18 @@ input[type="color"] {
   border-radius: 6px;
   padding: 0.3rem 0.45rem;
   font-size: 0.8rem;
+  max-width: 14rem;
+}
+
+.sync-ltc-device-field select {
+  max-width: 18rem;
+}
+
+.sync-refresh-btn {
+  padding: 0.3rem 0.45rem;
+  min-width: 2rem;
+  font-size: 0.85rem;
+  line-height: 1;
 }
 
 .sync-status {
