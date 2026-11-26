@@ -432,11 +432,14 @@ export function App() {
 
   const togglePlayRef = useRef(togglePlay);
   togglePlayRef.current = togglePlay;
-  const seekRef = useRef(seek);
-  seekRef.current = seek;
+  const zoomAroundPlayheadRef = useRef(zoomAroundPlayhead);
+  zoomAroundPlayheadRef.current = zoomAroundPlayhead;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
 
   // Space / F / G / H — same paths as transport / grid-bar controls.
   // Does not touch Click scheduling, MES, or lockToMediaClock.
+  // G/H = zoom out/in (prior Phase 1 mapping); snap stays checkbox-only.
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
     const isTextEntryTarget = (el: EventTarget | null): boolean => {
@@ -511,18 +514,17 @@ export function App() {
         return;
       }
       if (code === "KeyG") {
+        // Zoom out around playhead — same as − button.
         e.preventDefault();
         e.stopPropagation();
-        setProject((p) =>
-          updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
-        );
+        zoomAroundPlayheadRef.current(zoomRef.current / ZOOM_STEP);
         return;
       }
       if (code === "KeyH") {
-        // Home to start — same as transport ⇤.
+        // Zoom in around playhead — same as + button.
         e.preventDefault();
         e.stopPropagation();
-        seekRef.current(0);
+        zoomAroundPlayheadRef.current(zoomRef.current * ZOOM_STEP);
       }
     };
 
@@ -1259,7 +1261,7 @@ export function App() {
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
           <kbd>Space</kbd> play/pause · <kbd>F</kbd> follow ·{" "}
-          <kbd>G</kbd> snap · <kbd>H</kbd> home
+          <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in
         </span>
       </div>
 
