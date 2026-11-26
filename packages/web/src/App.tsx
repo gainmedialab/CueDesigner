@@ -430,30 +430,79 @@ export function App() {
     }
   }, [mediaUrl, playing]);
 
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
+  const seekRef = useRef(seek);
+  seekRef.current = seek;
+
   // Space / F / G / H — same paths as transport / grid-bar controls.
   // Does not touch Click scheduling, MES, or lockToMediaClock.
   useEffect(() => {
-    const isTypingTarget = (el: EventTarget | null): boolean => {
-      if (!(el instanceof HTMLElement)) return false;
-      const tag = el.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
-      if (el.isContentEditable) return true;
-      return Boolean(el.closest("input, textarea, select, [contenteditable=true]"));
+    /** Only block when the user is typing — not range/checkbox/button focus. */
+    const isTextEntryTarget = (el: EventTarget | null): boolean => {
+      const fromEvent = el instanceof Element ? el : null;
+      const active =
+        document.activeElement instanceof Element
+          ? document.activeElement
+          : null;
+      for (const start of [fromEvent, active]) {
+        if (!start) continue;
+        const target = start.closest(
+          "input, textarea, select, [contenteditable=true]",
+        );
+        if (!target) continue;
+        if (target instanceof HTMLTextAreaElement) {
+          if (!target.disabled && !target.readOnly) return true;
+          continue;
+        }
+        if (target instanceof HTMLSelectElement) {
+          if (!target.disabled) return true;
+          continue;
+        }
+        if (target instanceof HTMLElement && target.isContentEditable) {
+          return true;
+        }
+        if (target instanceof HTMLInputElement) {
+          if (target.disabled || target.readOnly) continue;
+          const type = (target.type || "text").toLowerCase();
+          // Scrub / zoom / vol / checkboxes keep focus — still allow shortcuts.
+          if (
+            type === "button" ||
+            type === "checkbox" ||
+            type === "radio" ||
+            type === "range" ||
+            type === "file" ||
+            type === "submit" ||
+            type === "reset" ||
+            type === "color" ||
+            type === "hidden"
+          ) {
+            continue;
+          }
+          return true;
+        }
+      }
+      return false;
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.repeat) return;
-      if (isTypingTarget(e.target)) return;
+      if (isTextEntryTarget(e.target)) return;
 
-      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-      if (key === " " || key === "Spacebar") {
+      // Prefer e.code so layout / modifiers don't break letter matching.
+      const code = e.code;
+      if (code === "Space") {
+        // preventDefault stops focused <button> from also synthesizing click
+        // (double toggle → Space looks dead).
         e.preventDefault();
-        void togglePlay();
+        e.stopPropagation();
+        void togglePlayRef.current();
         return;
       }
-      if (key === "f") {
+      if (code === "KeyF") {
         e.preventDefault();
+        e.stopPropagation();
         setFollowPlayhead((prev) => {
           const next = !prev;
           if (next) setFollowSuspended(false);
@@ -461,24 +510,26 @@ export function App() {
         });
         return;
       }
-      if (key === "g") {
+      if (code === "KeyG") {
         e.preventDefault();
+        e.stopPropagation();
         setProject((p) =>
           updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
         );
         return;
       }
-      if (key === "h") {
-        // Home to start — same as transport ⇤. Prior phase note had H=zoom-in
-        // paired with G=zoom-out; this task remaps G to magnetic snap.
+      if (code === "KeyH") {
+        // Home to start — same as transport ⇤.
         e.preventDefault();
-        seek(0);
+        e.stopPropagation();
+        seekRef.current(0);
       }
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [seek, togglePlay]);
+    // Capture on document so we see keys even when focus is on controls.
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
