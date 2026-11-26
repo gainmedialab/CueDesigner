@@ -91,8 +91,8 @@ Use the **BPM bar** under transport:
 | **F** | Toggle Follow playhead (clears scroll suspension when turning on) |
 | **G** | Zoom out around playhead (same as −) |
 | **H** | Zoom in around playhead (same as +) |
-
-Magnetic snap remains checkbox-only (no shortcut).
+| **S** | Toggle Magnetic snap |
+| **J** | Home — seek playhead to start (same as transport ⇤) |
 
 **Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). The **Follow** checkbox latches across play/pause (auto-scroll-during-play is deferred until transport baseline is re-confirmed). Manual scroll temporarily suspends follow (checkbox stays on; **Play** or re-check clears suspension). The waveform redraws for the visible span at device-pixel density, keyed to the same file-relative `tAbs` as the playhead, cues, and grid. Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 

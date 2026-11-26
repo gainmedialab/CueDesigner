@@ -436,10 +436,11 @@ export function App() {
   zoomAroundPlayheadRef.current = zoomAroundPlayhead;
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const seekRef = useRef(seek);
+  seekRef.current = seek;
 
-  // Space / F / G / H — same paths as transport / grid-bar controls.
+  // Space / F / G / H / S / J — transport / grid-bar / zoom paths.
   // Does not touch Click scheduling, MES, or lockToMediaClock.
-  // G/H = zoom out/in (prior Phase 1 mapping); snap stays checkbox-only.
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
     const isTextEntryTarget = (el: EventTarget | null): boolean => {
@@ -525,6 +526,22 @@ export function App() {
         e.preventDefault();
         e.stopPropagation();
         zoomAroundPlayheadRef.current(zoomRef.current * ZOOM_STEP);
+        return;
+      }
+      if (code === "KeyS") {
+        // Magnetic snap toggle — same as checkbox.
+        e.preventDefault();
+        e.stopPropagation();
+        setProject((p) =>
+          updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
+        );
+        return;
+      }
+      if (code === "KeyJ") {
+        // Home — seek to start (same as transport ⇤).
+        e.preventDefault();
+        e.stopPropagation();
+        seekRef.current(0);
       }
     };
 
@@ -1261,7 +1278,8 @@ export function App() {
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
           <kbd>Space</kbd> play/pause · <kbd>F</kbd> follow ·{" "}
-          <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in
+          <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
+          <kbd>S</kbd> snap · <kbd>J</kbd> home
         </span>
       </div>
 
