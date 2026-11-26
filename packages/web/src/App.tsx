@@ -430,6 +430,107 @@ export function App() {
     }
   }, [mediaUrl, playing]);
 
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
+  const seekRef = useRef(seek);
+  seekRef.current = seek;
+
+  // Space / F / G / H — same paths as transport / grid-bar controls.
+  // Does not touch Click scheduling, MES, or lockToMediaClock.
+  useEffect(() => {
+    /** Only block when the user is typing — not range/checkbox/button focus. */
+    const isTextEntryTarget = (el: EventTarget | null): boolean => {
+      const fromEvent = el instanceof Element ? el : null;
+      const active =
+        document.activeElement instanceof Element
+          ? document.activeElement
+          : null;
+      for (const start of [fromEvent, active]) {
+        if (!start) continue;
+        const target = start.closest(
+          "input, textarea, select, [contenteditable=true]",
+        );
+        if (!target) continue;
+        if (target instanceof HTMLTextAreaElement) {
+          if (!target.disabled && !target.readOnly) return true;
+          continue;
+        }
+        if (target instanceof HTMLSelectElement) {
+          if (!target.disabled) return true;
+          continue;
+        }
+        if (target instanceof HTMLElement && target.isContentEditable) {
+          return true;
+        }
+        if (target instanceof HTMLInputElement) {
+          if (target.disabled || target.readOnly) continue;
+          const type = (target.type || "text").toLowerCase();
+          // Scrub / zoom / vol / checkboxes keep focus — still allow shortcuts.
+          if (
+            type === "button" ||
+            type === "checkbox" ||
+            type === "radio" ||
+            type === "range" ||
+            type === "file" ||
+            type === "submit" ||
+            type === "reset" ||
+            type === "color" ||
+            type === "hidden"
+          ) {
+            continue;
+          }
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.repeat) return;
+      if (isTextEntryTarget(e.target)) return;
+
+      // Prefer e.code so layout / modifiers don't break letter matching.
+      const code = e.code;
+      if (code === "Space") {
+        // preventDefault stops focused <button> from also synthesizing click
+        // (double toggle → Space looks dead).
+        e.preventDefault();
+        e.stopPropagation();
+        void togglePlayRef.current();
+        return;
+      }
+      if (code === "KeyF") {
+        e.preventDefault();
+        e.stopPropagation();
+        setFollowPlayhead((prev) => {
+          const next = !prev;
+          if (next) setFollowSuspended(false);
+          return next;
+        });
+        return;
+      }
+      if (code === "KeyG") {
+        e.preventDefault();
+        e.stopPropagation();
+        setProject((p) =>
+          updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
+        );
+        return;
+      }
+      if (code === "KeyH") {
+        // Home to start — same as transport ⇤.
+        e.preventDefault();
+        e.stopPropagation();
+        seekRef.current(0);
+      }
+    };
+
+    // Capture on document so we see keys even when focus is on controls.
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, []);
+
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
     setMediaUrl(null);
@@ -1156,7 +1257,9 @@ export function App() {
         </label>
         <span className="grid-hint">
           Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
-          <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor
+          <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
+          <kbd>Space</kbd> play/pause · <kbd>F</kbd> follow ·{" "}
+          <kbd>G</kbd> snap · <kbd>H</kbd> home
         </span>
       </div>
 
