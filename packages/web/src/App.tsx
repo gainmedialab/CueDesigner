@@ -78,6 +78,7 @@ import {
   TC_SEEK_DRIFT_SEC,
   TimecodeSync,
   type LtcAudioDeviceInfo,
+  type MidiInputInfo,
 } from "./timecodeSync";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
@@ -132,6 +133,10 @@ export function App() {
   const [ltcDeviceId, setLtcDeviceId] = useState<string>("");
   const [ltcChannelIndex, setLtcChannelIndex] = useState(0);
   const [ltcDevicesLoading, setLtcDevicesLoading] = useState(false);
+  /** MTC MIDI input — session only. */
+  const [midiInputs, setMidiInputs] = useState<MidiInputInfo[]>([]);
+  const [midiInputId, setMidiInputId] = useState<string>("");
+  const [midiInputsLoading, setMidiInputsLoading] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -145,6 +150,8 @@ export function App() {
   };
   const ltcRouteRef = useRef({ deviceId: "", channelIndex: 0 });
   ltcRouteRef.current = { deviceId: ltcDeviceId, channelIndex: ltcChannelIndex };
+  const midiRouteRef = useRef({ inputId: "" });
+  midiRouteRef.current = { inputId: midiInputId };
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -212,6 +219,7 @@ export function App() {
     const sync = new TimecodeSync({
       getProjectFps: () => projectClockRef.current.fps,
       getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
+      getMidiInputId: () => midiRouteRef.current.inputId || null,
       getLtcDeviceId: () => ltcRouteRef.current.deviceId || null,
       getLtcChannelIndex: () => ltcRouteRef.current.channelIndex,
     });
@@ -257,6 +265,27 @@ export function App() {
     }
   }, []);
 
+  const refreshMidiInputs = useCallback(async () => {
+    setMidiInputsLoading(true);
+    try {
+      const inputs = await TimecodeSync.listMidiInputs();
+      setMidiInputs(inputs);
+      const prevId = midiRouteRef.current.inputId;
+      const nextId =
+        prevId && inputs.some((i) => i.id === prevId)
+          ? prevId
+          : (inputs[0]?.id ?? "");
+      midiRouteRef.current = { inputId: nextId };
+      setMidiInputId(nextId);
+    } catch (err) {
+      setStatus(
+        `MIDI input list failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setMidiInputsLoading(false);
+    }
+  }, []);
+
   // Switch LTC / MTC / Internal (permission prompts happen here).
   // External sync is chase-only: pause file transport immediately on leave Internal.
   useEffect(() => {
@@ -273,6 +302,9 @@ export function App() {
       if (syncSource === "ltc") {
         await refreshLtcDevices();
         if (cancelled) return;
+      } else if (syncSource === "mtc") {
+        await refreshMidiInputs();
+        if (cancelled) return;
       }
       if (cancelled) return;
       await sync.setSource(syncSource);
@@ -280,7 +312,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [syncSource, refreshLtcDevices]);
+  }, [syncSource, refreshLtcDevices, refreshMidiInputs]);
 
   // Keep FPS-match badge in sync when project FPS / offset changes.
   useEffect(() => {
@@ -1274,6 +1306,53 @@ export function App() {
                 }}
               >
                 {ltcDevicesLoading ? "…" : "↻"}
+              </button>
+            </>
+          ) : null}
+          {syncSource === "mtc" ? (
+            <>
+              <label className="sync-source-field sync-ltc-device-field">
+                MIDI
+                <select
+                  value={midiInputId}
+                  disabled={midiInputsLoading || midiInputs.length === 0}
+                  title="MIDI input port for MTC (IAC, USB interface, desk)"
+                  aria-label="MTC MIDI input"
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    midiRouteRef.current = { inputId: id };
+                    setMidiInputId(id);
+                    void syncRef.current?.applyMtcRoute();
+                  }}
+                >
+                  {midiInputs.length === 0 ? (
+                    <option value="">
+                      {midiInputsLoading ? "Scanning…" : "No MIDI inputs"}
+                    </option>
+                  ) : (
+                    midiInputs.map((i) => (
+                      <option key={i.id} value={i.id}>
+                        {i.manufacturer
+                          ? `${i.name} (${i.manufacturer})`
+                          : i.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="sync-refresh-btn"
+                disabled={midiInputsLoading}
+                title="Re-enumerate MIDI inputs"
+                onClick={() => {
+                  void (async () => {
+                    await refreshMidiInputs();
+                    void syncRef.current?.applyMtcRoute();
+                  })();
+                }}
+              >
+                {midiInputsLoading ? "…" : "↻"}
               </button>
             </>
           ) : null}

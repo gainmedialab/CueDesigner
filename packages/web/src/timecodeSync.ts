@@ -39,11 +39,18 @@ export interface LtcAudioDeviceInfo {
 /** Ideal channelCount request so Chromium opens multichannel devices fully. */
 export const LTC_CHANNEL_COUNT_IDEAL = 64;
 
+/** Web MIDI input port for MTC chase. */
+export interface MidiInputInfo {
+  id: string;
+  name: string;
+  manufacturer: string;
+}
+
 export interface TimecodeSyncOptions {
   getProjectFps: () => FrameRateLabel;
   getShowTcOffsetSec: () => number;
-  /** Optional preferred MIDI input id (Web MIDI). */
-  midiInputId?: string | null;
+  /** Preferred Web MIDI input id for MTC (empty = first available). */
+  getMidiInputId?: () => string | null;
   /** Preferred audioinput deviceId for LTC (empty = default). */
   getLtcDeviceId?: () => string | null;
   /** 0-based input channel index for LTC decode. */
@@ -74,6 +81,7 @@ export class TimecodeSync {
   private raf: number | null = null;
 
   // MTC
+  private midiAccess: MIDIAccess | null = null;
   private midiInput: MIDIInput | null = null;
   private mtc = new MtcAssembler();
   private onMidiMessage = (ev: MIDIMessageEvent) => this.handleMidi(ev);
@@ -209,6 +217,35 @@ export class TimecodeSync {
     return this.ltcStreamChannelCount;
   }
 
+  /**
+   * Rebind MTC to the MIDI input selected in the UI.
+   * No-op unless Sync source is already MTC.
+   */
+  async applyMtcRoute(): Promise<void> {
+    if (this.source !== "mtc") return;
+    await this.stopIo();
+    this.resetLock();
+    this.emit({
+      ...emptySyncStatus("mtc"),
+      detail: "Opening MIDI input…",
+    });
+    try {
+      await this.startMtc();
+      this.startWatchdog();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.emit({
+        source: "mtc",
+        lock: "unlocked",
+        tc: null,
+        tcDisplay: null,
+        fpsMatch: true,
+        detail: msg,
+        lastFrameAtMs: null,
+      });
+    }
+  }
+
   // --- Internal helpers ------------------------------------------------------
 
   private resetLock(): void {
@@ -312,6 +349,10 @@ export class TimecodeSync {
       this.midiInput.removeEventListener("midimessage", this.onMidiMessage);
       this.midiInput = null;
     }
+    if (this.midiAccess) {
+      this.midiAccess.onstatechange = null;
+      this.midiAccess = null;
+    }
     this.mtc.reset();
 
     if (this.processor) {
@@ -349,12 +390,14 @@ export class TimecodeSync {
       throw new Error("Web MIDI unavailable in this browser");
     }
     const access = await navigator.requestMIDIAccess({ sysex: true });
+    this.midiAccess = access;
     const inputs = [...access.inputs.values()];
     if (inputs.length === 0) {
       throw new Error("No MIDI inputs found");
     }
-    const preferred = this.opts.midiInputId
-      ? inputs.find((i) => i.id === this.opts.midiInputId)
+    const preferredId = this.opts.getMidiInputId?.() || null;
+    const preferred = preferredId
+      ? inputs.find((i) => i.id === preferredId)
       : null;
     const input = preferred ?? inputs[0]!;
     this.midiInput = input;
@@ -395,14 +438,15 @@ export class TimecodeSync {
     }
   }
 
-  /** Enumerate MIDI inputs for a future device picker. */
-  static async listMidiInputs(): Promise<{ id: string; name: string }[]> {
+  /** Enumerate Web MIDI input ports for the MTC device picker. */
+  static async listMidiInputs(): Promise<MidiInputInfo[]> {
     if (!navigator.requestMIDIAccess) return [];
     try {
       const access = await navigator.requestMIDIAccess({ sysex: true });
       return [...access.inputs.values()].map((i) => ({
         id: i.id,
         name: i.name || i.id,
+        manufacturer: i.manufacturer || "",
       }));
     } catch {
       return [];
