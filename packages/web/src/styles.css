@@ -204,6 +204,83 @@ input[type="color"] {
   accent-color: var(--playhead);
 }
 
+.sync-block {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-left: 0.25rem;
+  flex-shrink: 0;
+}
+
+.sync-source-field {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.sync-source-field select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.8rem;
+}
+
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  max-width: 18rem;
+}
+
+.sync-lock-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: #5a6578;
+  flex-shrink: 0;
+}
+
+.sync-lock-locked .sync-lock-dot {
+  background: #3ecf8e;
+}
+
+.sync-lock-freewheel .sync-lock-dot {
+  background: var(--playhead);
+}
+
+.sync-lock-locking .sync-lock-dot {
+  background: #5a9fff;
+}
+
+.sync-lock-unlocked .sync-lock-dot {
+  background: #5a6578;
+}
+
+.sync-tc {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-fps-warn {
+  color: var(--danger);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.sync-fps-mismatch {
+  border-color: rgba(232, 93, 93, 0.55);
+}
+
 .grid-bar {
   display: flex;
   flex-wrap: wrap;

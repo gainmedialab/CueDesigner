@@ -9,6 +9,7 @@ import {
   deleteDepartment,
   deleteCuesForDepartment,
   deserializeProject,
+  emptySyncStatus,
   formatAbsoluteTime,
   formatMusicalPosition,
   formatTime,
@@ -30,6 +31,7 @@ import {
   rulerMarkTimes,
   setProjectMedia,
   snapToGrid,
+  SYNC_CLOCK_SOURCES,
   TIME_DISPLAY_MODES,
   timeDisplayModeLabel,
   timeFieldLabel,
@@ -42,6 +44,8 @@ import {
   type FrameRateLabel,
   type GridResolution,
   type Project,
+  type SyncClockSource,
+  type SyncStatusSnapshot,
   type TimeDisplayMode,
 } from "@cuedesigner/core";
 import {
@@ -70,6 +74,7 @@ import {
   putProjectMedia,
 } from "./mediaStore";
 import { ExportDialog } from "./ExportDialog";
+import { TC_SEEK_DRIFT_SEC, TimecodeSync } from "./timecodeSync";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
@@ -113,8 +118,22 @@ export function App() {
   const [followSuspended, setFollowSuspended] = useState(false);
   /** Export dialog open — suspends Space/F/G/H/S/J while open; transport/Click unchanged. */
   const [exportOpen, setExportOpen] = useState(false);
+  /** Session clock source — Internal keeps HTMLMediaElement transport untouched. */
+  const [syncSource, setSyncSource] = useState<SyncClockSource>("internal");
+  const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot>(() =>
+    emptySyncStatus("internal"),
+  );
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const syncRef = useRef<TimecodeSync | null>(null);
+  const projectClockRef = useRef({
+    fps: project.settings.fps,
+    showTcOffsetSec: project.settings.showTcOffsetSec,
+  });
+  projectClockRef.current = {
+    fps: project.settings.fps,
+    showTcOffsetSec: project.settings.showTcOffsetSec,
+  };
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -178,6 +197,14 @@ export function App() {
     const onSeeked = () => metronomeRef.current?.resync();
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("seeked", onSeeked);
+
+    const sync = new TimecodeSync({
+      getProjectFps: () => projectClockRef.current.fps,
+      getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
+    });
+    syncRef.current = sync;
+    sync.onStatus((s) => setSyncStatus(s));
+
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
@@ -185,8 +212,22 @@ export function App() {
       audioRef.current = null;
       metronome.dispose();
       metronomeRef.current = null;
+      sync.dispose();
+      syncRef.current = null;
     };
   }, []);
+
+  // Switch LTC / MTC / Internal (permission prompts happen here).
+  useEffect(() => {
+    const sync = syncRef.current;
+    if (!sync) return;
+    void sync.setSource(syncSource);
+  }, [syncSource]);
+
+  // Keep FPS-match badge in sync when project FPS / offset changes.
+  useEffect(() => {
+    syncRef.current?.refreshProjectClock();
+  }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
   // Keep metronome grid / enable / volume in sync with project settings
   useEffect(() => {
@@ -242,22 +283,41 @@ export function App() {
     return () => audio.removeEventListener("loadedmetadata", syncDuration);
   }, [mediaUrl]);
 
-  // RAF clock while playing
+  // RAF clock: Internal follows HTMLMediaElement while playing; LTC/MTC chase
+  // drives the playhead when locked/freewheel and only seeks media on drift.
   useEffect(() => {
+    const external =
+      syncSource === "ltc" || syncSource === "mtc";
     const tick = () => {
+      const sync = syncRef.current;
+      const chase = external ? sync?.sampleChase() : null;
+      if (chase) {
+        const t = chase.tAbs;
+        setCurrentTime(t);
+        const audio = audioRef.current;
+        if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+          const clamped = Math.min(Math.max(0, t), audio.duration);
+          if (Math.abs(audio.currentTime - clamped) > TC_SEEK_DRIFT_SEC) {
+            audio.currentTime = clamped;
+            metronomeRef.current?.resync();
+          }
+        }
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
       const audio = audioRef.current;
       if (audio && playing) {
         setCurrentTime(audio.currentTime);
         rafRef.current = requestAnimationFrame(tick);
       }
     };
-    if (playing) {
+    if (playing || external) {
       rafRef.current = requestAnimationFrame(tick);
     }
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, [playing]);
+  }, [playing, syncSource]);
 
   // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
   // Manual scroll suspends follow (checkbox stays on); programmatic scrolls are ignored.
@@ -1030,6 +1090,54 @@ export function App() {
         >
           Cue at playhead
         </button>
+        <div className="sync-block" aria-label="Timecode sync source">
+          <label className="sync-source-field">
+            Sync
+            <select
+              value={syncSource}
+              title="Clock source: Internal file clock, LTC (audio), or MTC (MIDI)"
+              aria-label="Timecode sync source"
+              onChange={(e) =>
+                setSyncSource(e.target.value as SyncClockSource)
+              }
+            >
+              {SYNC_CLOCK_SOURCES.map((src) => (
+                <option key={src} value={src}>
+                  {src === "internal"
+                    ? "Internal"
+                    : src === "ltc"
+                      ? "LTC"
+                      : "MTC"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span
+            className={`sync-status sync-lock-${syncStatus.lock}${
+              syncStatus.fpsMatch ? "" : " sync-fps-mismatch"
+            }`}
+            title={syncStatus.detail}
+          >
+            <span className="sync-lock-dot" aria-hidden />
+            <span className="sync-lock-label">
+              {syncSource === "internal"
+                ? "Internal"
+                : syncStatus.lock === "locked"
+                  ? "Locked"
+                  : syncStatus.lock === "freewheel"
+                    ? "Freewheel"
+                    : syncStatus.lock === "locking"
+                      ? "Locking"
+                      : "Unlocked"}
+            </span>
+            {syncStatus.tcDisplay ? (
+              <span className="sync-tc">{syncStatus.tcDisplay}</span>
+            ) : null}
+            {!syncStatus.fpsMatch ? (
+              <span className="sync-fps-warn">FPS≠</span>
+            ) : null}
+          </span>
+        </div>
       </div>
 
       <div className="grid-bar" aria-label="BPM and snap settings">

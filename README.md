@@ -108,7 +108,19 @@ Transport **Abs / TC / Mus** switches the clock, timeline ruler, cue list, and i
 
 Canonical storage remains **file-relative absolute seconds** (`cue.tAbs`). Editing in any mode parses back to absolute; the inspector also shows Abs · TC · musical as a cross-check.
 
-Live LTC/MTC I/O hardware remains deferred; **file exports** ship in Phase 1 (below).
+## Live timecode sync (LTC / MTC chase)
+
+Transport **Sync** selects the show clock source:
+
+| Source | Path | Notes |
+|--------|------|--------|
+| **Internal** | HTMLMediaElement file clock | Default. Smooth play/scrub; Click metronome unchanged. |
+| **LTC** | Web Audio `getUserMedia` → bi-phase LTC decode | Grant mic/line permission; feed LTC into the chosen input (not monitored to speakers). |
+| **MTC** | Web MIDI quarter-frame + full-frame SysEx | Uses the first available MIDI input (Electron/Chromium). |
+
+When **Locked** (or briefly **Freewheel** over dropouts), the playhead follows decoded show TC minus **TC offset**. Media is seeked only if drift > ~50 ms so Internal mode stays smooth. **FPS≠** warns when the stream rate disagrees with project **FPS**. Unlocked external sources fall back to the internal file clock.
+
+No native Electron MIDI addon in this slice — Chromium Web MIDI + Web Audio cover Mac-first desktop and web. Generate/outgoing TC remains later.
 
 ## Show exports (export-only)
 
