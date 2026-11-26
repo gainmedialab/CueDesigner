@@ -122,7 +122,7 @@ Use the top-bar **Export** button. Downloads stay on the machine (browser downlo
 | **SFX / Finale CSV** | `*_SFX_Finale.csv` | Tab-delimited Finale firing-script CSV (event time, prefire, module/pin, label) for FireControl G3–style import. Optional cue `fields`: `prefireSec`, `module`/`rail`, `pin`, `position`, `hazard`. |
 | **Generic CSV / TAB** | `*_cues.csv` / `*_cues.tsv` | Neutral columns: dept, cue no, abs / show TC / musical, fade, note, BPM, FPS. |
 
-Dialog options: multi-format select, department filter, optional one-file-per-department (MagicQ / MA2). Pyro/SFX exports require an acknowledgement checkbox — planning data only; the app does not arm or fire hardware.
+Dialog options: multi-format select, department filter, optional one-file-per-department (MagicQ / MA2). Selecting **more than one format** downloads a single `*_exports.zip` (browsers block rapid multi-file clicks); one format downloads that file alone. Pyro/SFX exports require an acknowledgement checkbox — planning data only; the app does not arm or fire hardware.
 
 **How to test (quick):** New project → import audio → place a few cues on Lighting + Pyro/SFX → set FPS / TC offset → **Export** → download MagicQ + grandMA3 + SFX + Generic → open CSVs in a text editor; confirm TC times match Show TC mode; import MagicQ CSV on a MagicQ PC (Import TC Timings); import the MA3 XML macro on grandMA3 onPC and run it into an empty range.
 

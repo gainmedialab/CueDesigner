@@ -3,20 +3,12 @@ import {
   PYRO_SAFETY_COPY,
   buildExportPack,
   countExportCues,
+  sanitizeFilename,
   type ExportFormatId,
   type Project,
 } from "@cuedesigner/core";
 import { useEffect, useMemo, useState } from "react";
-
-function downloadTextFile(filename: string, content: string, mimeType: string) {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+import { buildZipBlob, downloadBlob } from "./zipDownload";
 
 export interface ExportDialogProps {
   project: Project;
@@ -106,13 +98,32 @@ export function ExportDialog({
       timecodePoolSlot,
     });
 
-    for (const file of files) {
-      downloadTextFile(file.filename, file.content, file.mimeType);
+    if (files.length === 0) {
+      onStatus("Export: nothing to download.");
+      return;
     }
 
-    onStatus(
-      `Exported ${files.length} file${files.length === 1 ? "" : "s"} (${cueCount} cue${cueCount === 1 ? "" : "s"}). Offline download — no network used.`,
-    );
+    // Browsers block rapid multi a.click() downloads — one file stays a single
+    // download; two+ formats go in one ZIP so every selected format arrives.
+    if (files.length === 1) {
+      const file = files[0]!;
+      downloadBlob(
+        file.filename,
+        new Blob([file.content], { type: file.mimeType }),
+      );
+      onStatus(
+        `Exported ${file.filename} (${cueCount} cue${cueCount === 1 ? "" : "s"}). Offline download — no network used.`,
+      );
+    } else {
+      const zipName = `${sanitizeFilename(project.name)}_exports.zip`;
+      const zip = buildZipBlob(
+        files.map((f) => ({ filename: f.filename, content: f.content })),
+      );
+      downloadBlob(zipName, zip);
+      onStatus(
+        `Exported ${files.length} files in ${zipName} (${cueCount} cue${cueCount === 1 ? "" : "s"}). Offline download — no network used.`,
+      );
+    }
     onClose();
   };
 
@@ -264,7 +275,7 @@ export function ExportDialog({
               (needsPyroAck && !pyroAck)
             }
           >
-            Download
+            {selected.size > 1 ? "Download zip" : "Download"}
           </button>
         </footer>
       </div>
