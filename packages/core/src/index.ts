@@ -3,6 +3,7 @@ export * from "./departments.js";
 export * from "./cues.js";
 export * from "./project.js";
 export * from "./persist.js";
+export * from "./sharePackage.js";
 export * from "./time.js";
 export * from "./timecodeIo.js";
 export * from "./grid.js";

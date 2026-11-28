@@ -132,3 +132,106 @@ export function downloadBlob(filename: string, blob: Blob) {
   // Revoke after the click has been processed.
   window.setTimeout(() => URL.revokeObjectURL(url), 2_000);
 }
+
+function readU16(view: DataView, offset: number): number {
+  return view.getUint16(offset, true);
+}
+
+function readU32(view: DataView, offset: number): number {
+  return view.getUint32(offset, true);
+}
+
+/**
+ * Minimal ZIP reader for CueDesigner share packages.
+ * Supports store (method 0) entries — matches buildZipBlob output.
+ * Inflate/deflate archives are rejected with a clear error.
+ */
+export async function readZipEntries(
+  source: Blob | ArrayBuffer | Uint8Array,
+): Promise<{ filename: string; content: Uint8Array }[]> {
+  let bytes: Uint8Array;
+  if (source instanceof Uint8Array) {
+    bytes = source;
+  } else if (source instanceof ArrayBuffer) {
+    bytes = new Uint8Array(source);
+  } else {
+    bytes = new Uint8Array(await source.arrayBuffer());
+  }
+
+  if (bytes.byteLength < 22) {
+    throw new Error("ZIP is too small");
+  }
+
+  // Copy into a standalone buffer so DataView offsets are byte-accurate.
+  const ab = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  const view = new DataView(ab);
+  const u8 = new Uint8Array(ab);
+
+  // Locate end-of-central-directory (scan backwards for signature).
+  let eocd = -1;
+  for (let i = u8.byteLength - 22; i >= 0; i--) {
+    if (readU32(view, i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) {
+    throw new Error("ZIP end-of-central-directory not found");
+  }
+
+  const entryCount = readU16(view, eocd + 10);
+  const centralSize = readU32(view, eocd + 12);
+  const centralOffset = readU32(view, eocd + 16);
+  if (centralOffset + centralSize > u8.byteLength) {
+    throw new Error("ZIP central directory is truncated");
+  }
+
+  const dec = new TextDecoder();
+  const out: { filename: string; content: Uint8Array }[] = [];
+  let cursor = centralOffset;
+
+  for (let n = 0; n < entryCount; n++) {
+    if (readU32(view, cursor) !== 0x02014b50) {
+      throw new Error("ZIP central directory entry is corrupt");
+    }
+    const method = readU16(view, cursor + 10);
+    const compSize = readU32(view, cursor + 20);
+    const nameLen = readU16(view, cursor + 28);
+    const extraLen = readU16(view, cursor + 30);
+    const commentLen = readU16(view, cursor + 32);
+    const localOffset = readU32(view, cursor + 42);
+    const name = dec.decode(u8.subarray(cursor + 46, cursor + 46 + nameLen));
+
+    if (readU32(view, localOffset) !== 0x04034b50) {
+      throw new Error(`ZIP local header missing for ${name}`);
+    }
+    const localNameLen = readU16(view, localOffset + 26);
+    const localExtraLen = readU16(view, localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+    const dataEnd = dataStart + compSize;
+    if (dataEnd > u8.byteLength) {
+      throw new Error(`ZIP entry truncated: ${name}`);
+    }
+
+    if (method !== 0) {
+      throw new Error(
+        `ZIP entry “${name}” uses compression method ${method}; CueDesigner share packages must be store-only (uncompressed). Re-Share from CueDesigner.`,
+      );
+    }
+
+    // Skip directory markers
+    if (!name.endsWith("/")) {
+      out.push({
+        filename: name.replace(/^\/+/, ""),
+        content: u8.subarray(dataStart, dataEnd),
+      });
+    }
+
+    cursor += 46 + nameLen + extraLen + commentLen;
+  }
+
+  return out;
+}

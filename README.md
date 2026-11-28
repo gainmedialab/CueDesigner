@@ -164,7 +164,23 @@ CueDesigner never uploads project or audio data. Everything stays on the machine
 | **Open** | Restores cues from JSON, then reloads audio from embedded `mediaDataUrl` if present, otherwise from IndexedDB for that project id. Play / scrub work when media is found. If the project references media but neither source has it, the UI prompts clearly to **re-import** that file. |
 | **New** | Clears session media and drops the previous project's IndexedDB media entry. |
 
-Folder / sidecar packages (copy media next to JSON) are planned for a later phase; Phase 0 uses embed-small + IndexedDB for the simplest durable browser + Electron path.
+## Team file sharing (MVP — offline packages)
+
+Sharing is **file-based** (USB / NAS / Drive / Dropbox). No accounts, no realtime multiplayer.
+
+| Action | What happens |
+|--------|----------------|
+| **Share** | Downloads a portable `ShowName.cueproj.zip` with `project.json`, optional `media/<track>`, and `README.txt` (how to open + conflict guidance). Media is packed at full size when loaded in the session (no 8 MiB embed cap). |
+| **Open shared** | Picks a `.cueproj.zip` / `.zip`, restores cues + settings, and reloads packed media when present. If media is missing, the status line prompts **Import audio**. |
+
+**Handoff rules:** prefer one show master; Share → send zip → teammate Open shared. Do not edit the same cloud-synced file from two machines at once (last writer wins). Local **Save** / **Open** (`.cueproj.json`) stay unchanged for single-operator work.
+
+```text
+My_Show.cueproj.zip
+  project.json     # same schema as .cueproj.json (no mediaDataUrl)
+  media/track.wav  # when session media was available
+  README.txt       # open steps + conflict guidance
+```
 
 ## Project file sketch
 
