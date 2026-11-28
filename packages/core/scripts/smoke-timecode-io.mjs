@@ -5,9 +5,12 @@
  */
 import {
   MtcAssembler,
+  absoluteToSyncFrame,
   decodeLtcFrameBits,
   encodeLtcFrameBits,
+  encodeMtcQuarterFrameData,
   formatSyncTimecode,
+  frameRateLabelToMtcRateBits,
   ltcBitsToBiphasePcm,
   syncFrameToAbsolute,
 } from "../dist/index.js";
@@ -40,6 +43,15 @@ assert(pcm.length === 80 * 48, "PCM length");
 const tAbs = syncFrameToAbsolute(decoded, "25", 3600);
 assert(Math.abs(tAbs - (1 * 3600 + 2 * 60 + 3 + 4 / 25 - 3600)) < 1e-6, "abs");
 
+// Generate path: absolute → frame → LTC encode (transport-locked out)
+const gen = absoluteToSyncFrame(125.16, "25", 3600); // 01:02:05:04 @ 25
+assert(gen.hours === 1 && gen.minutes === 2, "gen HMS");
+assert(gen.seconds === 5 && gen.frames === 4, "gen SF");
+assert(gen.dropFrame === false, "gen DF");
+const genBits = encodeLtcFrameBits(gen);
+const genDecoded = decodeLtcFrameBits(genBits);
+assert(genDecoded && genDecoded.frames === 4, "gen LTC roundtrip");
+
 // MTC quarter frames for 01:02:03:04 @ 25fps (rate bits = 1)
 const assembler = new MtcAssembler();
 const frames = 4;
@@ -64,5 +76,20 @@ for (let type = 0; type < 8; type++) {
 assert(got, "MTC did not assemble");
 assert(got.hours === 1 && got.frames === 4, "MTC fields");
 assert(got.fpsLabel === "25", "MTC rate");
+
+// MTC encode helper (stub for future MIDI out) round-trips via assembler
+assert(frameRateLabelToMtcRateBits("25") === 1, "mtc rate bits");
+const qf = encodeMtcQuarterFrameData({
+  hours: 1,
+  minutes: 2,
+  seconds: 3,
+  frames: 4,
+  fpsLabel: "25",
+});
+assert(qf.length === 8, "qf length");
+const assembler2 = new MtcAssembler();
+let got2 = null;
+for (const b of qf) got2 = assembler2.pushQuarterFrame(b);
+assert(got2 && got2.hours === 1 && got2.frames === 4, "qf encode roundtrip");
 
 console.log("smoke-timecode-io: ok");

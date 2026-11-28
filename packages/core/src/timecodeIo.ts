@@ -9,6 +9,7 @@ import type { FrameRateLabel } from "./types.js";
 import {
   formatTimecodeParts,
   frameRateInfo,
+  secondsToTimecode,
   timecodeToSeconds,
   type TimecodeParts,
 } from "./time.js";
@@ -100,6 +101,28 @@ export function syncFrameToAbsolute(
   return Math.max(0, showSec - (showTcOffsetSec || 0));
 }
 
+/**
+ * Outgoing show TC frame for file-relative `tAbs` + project offset / FPS.
+ * Used by LTC/MTC generate so the emitted clock matches the transport playhead.
+ */
+export function absoluteToSyncFrame(
+  tAbs: number,
+  projectFps: FrameRateLabel,
+  showTcOffsetSec: number,
+): SyncTimecodeFrame {
+  const showSec = Math.max(0, tAbs) + (showTcOffsetSec || 0);
+  const parts = secondsToTimecode(showSec, projectFps);
+  const info = frameRateInfo(projectFps);
+  return {
+    hours: parts.hours,
+    minutes: parts.minutes,
+    seconds: parts.seconds,
+    frames: parts.frames,
+    fpsLabel: projectFps,
+    dropFrame: info.dropFrame,
+  };
+}
+
 /** Map MTC rate bits (hours high nibble bits 5–6) → project FPS label. */
 export function mtcRateToFrameRateLabel(
   rateBits: number,
@@ -116,6 +139,59 @@ export function mtcRateToFrameRateLabel(
     default:
       return null;
   }
+}
+
+/** Map project FPS → MTC rate bits (for generate / tests). */
+export function frameRateLabelToMtcRateBits(label: FrameRateLabel): number {
+  switch (label) {
+    case "23.976":
+    case "24":
+      return 0;
+    case "25":
+      return 1;
+    case "29.97 DF":
+      return 2;
+    case "29.97 NDF":
+    case "30":
+      return 3;
+    default: {
+      const _exhaustive: never = label;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * Encode a frame into eight MTC quarter-frame *data* bytes (status 0xF1 omitted).
+ * Each byte is `(type << 4) | nibble` for types 0…7. Stub path for MTC out.
+ */
+export function encodeMtcQuarterFrameData(
+  tc: Pick<
+    SyncTimecodeFrame,
+    "hours" | "minutes" | "seconds" | "frames" | "fpsLabel"
+  >,
+  rateBits?: number,
+): number[] {
+  const rate =
+    rateBits ??
+    frameRateLabelToMtcRateBits(
+      (tc.fpsLabel as FrameRateLabel | null) ?? "25",
+    );
+  const hours = tc.hours & 0x1f;
+  const minutes = tc.minutes & 0x3f;
+  const seconds = tc.seconds & 0x3f;
+  const frames = tc.frames & 0x1f;
+  const nibbles = [
+    frames & 0xf,
+    (frames >> 4) & 0xf,
+    seconds & 0xf,
+    (seconds >> 4) & 0xf,
+    minutes & 0xf,
+    (minutes >> 4) & 0xf,
+    hours & 0xf,
+    ((hours >> 4) & 0x1) | ((rate & 0x3) << 1),
+  ];
+  return nibbles.map((n, type) => ((type & 0x7) << 4) | (n & 0xf));
 }
 
 /** Compare stream FPS to project FPS (DF vs NDF treated as mismatch). */

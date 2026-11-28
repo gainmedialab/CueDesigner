@@ -135,7 +135,18 @@ Transport **Sync** selects the show clock source:
 
 **MTC MIDI picker:** Sync → MTC requests Web MIDI access, lists input ports (`requestMIDIAccess` → `inputs`), and binds the selected port for quarter-frame / full-frame SysEx. Use an IAC loopback or a USB MIDI interface from the desk. **↻** re-scans after hot-plug.
 
-No native Electron MIDI addon in this slice — Chromium Web MIDI + Web Audio cover Mac-first desktop and web. Generate/outgoing TC remains later.
+No native Electron MIDI addon in this slice — Chromium Web MIDI + Web Audio cover Mac-first desktop and web.
+
+### Generate (outgoing TC)
+
+**Generate** is independent of Sync chase (arm/disarm does not tear down LTC/MTC input).
+
+| Flavour | Path | Notes |
+|---------|------|--------|
+| **LTC out** (shipped) | Dedicated Web Audio `AudioContext` + `setSinkId` + `ChannelMerger` | Transport-locked: emits only while **Internal** transport is **playing** and **Arm** is on. Pick **Out** device + **Ch**. Uses project **FPS** + **TC offset**. |
+| **MTC out** | Stub | UI option disabled (“soon”); core encode helpers ready for a later MIDI-output slice. |
+
+**Safety:** LTC generate stays **disarmed** by default and uses its own AudioContext (not the show-media path). Prefer a dedicated TC feed (BlackHole, Dante, interface card) — **never** route LTC into FOH or cue monitors. Status shows **LTC ≠ FOH**. When Sync is LTC/MTC chase, file Play is disabled so generate is silent (still transport-locked).
 
 ## Show exports (export-only)
 
