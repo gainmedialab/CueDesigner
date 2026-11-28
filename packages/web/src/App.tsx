@@ -211,6 +211,32 @@ export function App() {
    */
   const [editMode, setEditMode] = useState<AppEditMode>("edit");
   const editsLocked = editMode === "show";
+  /**
+   * Shell drawers — Sync / Generate / Loop / Grid collapse by default so the
+   * transport + Next countdown stay primary. Exclusive: one open at a time.
+   */
+  const [shellDrawer, setShellDrawer] = useState<
+    null | "sync" | "generate" | "loop" | "grid"
+  >(null);
+  /** Keyboard shortcut / help popover (?). */
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpPopoverRef = useRef<HTMLDivElement | null>(null);
+  /** In-app File menu (web only — Electron uses the native application menu). */
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const fileMenuRef = useRef<HTMLDivElement | null>(null);
+  const isDesktopShell = Boolean(
+    window.cueDesktop?.isDesktop ?? window.cueDesktop,
+  );
+  const shellDrawerRef = useRef(shellDrawer);
+  shellDrawerRef.current = shellDrawer;
+  const helpOpenRef = useRef(helpOpen);
+  helpOpenRef.current = helpOpen;
+  const fileMenuOpenRef = useRef(fileMenuOpen);
+  fileMenuOpenRef.current = fileMenuOpen;
+  /** Filled after New/Open/Save handlers are defined; used by keydown + desktop IPC. */
+  const runFileActionRef = useRef<(payload: CueDesktopFilePayload) => void>(
+    () => undefined,
+  );
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -1102,6 +1128,67 @@ export function App() {
       }
       if (isTextEntryTarget(e.target)) return;
 
+      // Escape closes File menu / shell drawers / help before transport keys.
+      if (e.code === "Escape" || e.key === "Escape") {
+        if (
+          fileMenuOpenRef.current ||
+          helpOpenRef.current ||
+          shellDrawerRef.current
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          setFileMenuOpen(false);
+          setHelpOpen(false);
+          setShellDrawer(null);
+        }
+        return;
+      }
+
+      // Web File accelerators (Electron uses the native File menu instead).
+      if (
+        !isDesktopShell &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.repeat
+      ) {
+        const fileAction =
+          e.code === "KeyN" && !e.shiftKey
+            ? "new"
+            : e.code === "KeyO" && e.shiftKey
+              ? "open-shared"
+              : e.code === "KeyO" && !e.shiftKey
+                ? "open"
+                : e.code === "KeyS" && e.shiftKey
+                  ? "share"
+                  : e.code === "KeyS" && !e.shiftKey
+                    ? "save"
+                    : e.code === "KeyE" && !e.shiftKey
+                      ? "export"
+                      : null;
+        if (fileAction) {
+          e.preventDefault();
+          e.stopPropagation();
+          setFileMenuOpen(false);
+          runFileActionRef.current(fileAction as CueDesktopFileAction);
+          return;
+        }
+      }
+
+      // ? / Shift+/ toggles shortcut help (not a transport shortcut).
+      if (
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (e.key === "?" || (e.code === "Slash" && e.shiftKey))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setHelpOpen((prev) => !prev);
+        setShellDrawer(null);
+        setFileMenuOpen(false);
+        return;
+      }
+
       const action = matchTransportShortcut(e);
       if (!action) return;
       e.preventDefault();
@@ -1194,16 +1281,60 @@ export function App() {
     document.addEventListener("keydown", onKeyDown, true);
     // Electron bare-key bridge (IPC + CustomEvent); deduped with DOM keydown.
     window.addEventListener("cuedesigner-shortcut", onDesktopShortcut);
+    const onDesktopFile = (ev: Event) => {
+      const detail = (ev as CustomEvent<CueDesktopFilePayload>).detail;
+      if (detail != null) runFileActionRef.current(detail);
+    };
+
     const unsubDesktop = window.cueDesktop?.onShortcut((action) => {
       runDesktopAction(action);
     });
+    // Prefer preload IPC. CustomEvent is only for stale preloads that lack onFileAction
+    // (main still dual-dispatches string actions — avoid double Save/New dialogs).
+    const unsubFile = window.cueDesktop?.onFileAction?.((payload) => {
+      runFileActionRef.current(payload);
+    });
+    const useFileCustomEvent = !window.cueDesktop?.onFileAction;
+    if (useFileCustomEvent) {
+      window.addEventListener("cuedesigner-file", onDesktopFile);
+    }
 
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("cuedesigner-shortcut", onDesktopShortcut);
+      if (useFileCustomEvent) {
+        window.removeEventListener("cuedesigner-file", onDesktopFile);
+      }
       unsubDesktop?.();
+      unsubFile?.();
     };
-  }, []);
+  }, [isDesktopShell]);
+
+  // Dismiss shortcut help when clicking outside the popover (HIG: light dismiss).
+  useEffect(() => {
+    if (!helpOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const root = helpPopoverRef.current;
+      if (!root) return;
+      if (e.target instanceof Node && root.contains(e.target)) return;
+      setHelpOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [helpOpen]);
+
+  // Dismiss in-app File menu on outside click.
+  useEffect(() => {
+    if (!fileMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const root = fileMenuRef.current;
+      if (!root) return;
+      if (e.target instanceof Node && root.contains(e.target)) return;
+      setFileMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [fileMenuOpen]);
 
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
@@ -1270,6 +1401,26 @@ export function App() {
     }
   };
 
+  /** Electron Save dialog when available; otherwise <a download>. */
+  const deliverDownload = async (filename: string, fileBlob: Blob) => {
+    const saveFile = window.cueDesktop?.saveFile;
+    if (saveFile) {
+      const data = await fileBlob.arrayBuffer();
+      const result = await saveFile({ defaultPath: filename, data });
+      if (!result.ok) {
+        if (result.reason === "canceled") {
+          setStatus("Save canceled.");
+          return false;
+        }
+        setStatus("Save failed (desktop dialog).");
+        return false;
+      }
+      return true;
+    }
+    downloadBlob(filename, fileBlob);
+    return true;
+  };
+
   const onSaveProject = async () => {
     const touched = touchProject(project);
     let mediaDataUrl: string | undefined;
@@ -1295,11 +1446,9 @@ export function App() {
     }
 
     const fileBlob = projectDownloadBlob(touched, mediaDataUrl);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(fileBlob);
-    a.download = `${touched.name.replace(/[^\w.-]+/g, "_") || "show"}.cueproj.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const filename = `${touched.name.replace(/[^\w.-]+/g, "_") || "show"}.cueproj.json`;
+    const saved = await deliverDownload(filename, fileBlob);
+    if (!saved) return;
     setProject(touched);
 
     if (!project.media) {
@@ -1319,10 +1468,7 @@ export function App() {
     }
   };
 
-  const onOpenProject = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  const openProjectFromFile = async (file: File) => {
     try {
       const text = await file.text();
       const { project: loaded, mediaDataUrl } = deserializeProject(text);
@@ -1378,6 +1524,13 @@ export function App() {
     }
   };
 
+  const onOpenProject = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await openProjectFromFile(file);
+  };
+
   const onNewProject = () => {
     if (!allowShowEdit("newProject", "new project")) return;
     const previousId = project.id;
@@ -1426,7 +1579,8 @@ export function App() {
         mediaMimeType: meta?.mimeType ?? touched.media?.mimeType,
       });
       const zipBlob = buildZipBlob(packed.entries);
-      downloadBlob(packed.filename, zipBlob);
+      const saved = await deliverDownload(packed.filename, zipBlob);
+      if (!saved) return;
 
       if (packed.includedMedia && blob) {
         setStatus(
@@ -1448,10 +1602,7 @@ export function App() {
     }
   };
 
-  const onOpenSharedPackage = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  const openSharedFromFile = async (file: File) => {
     try {
       setStatus(`Opening shared package ${file.name}…`);
       const zipEntries = await readZipEntries(file);
@@ -1531,6 +1682,22 @@ export function App() {
         `Open shared failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  };
+
+  const onOpenSharedPackage = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await openSharedFromFile(file);
+  };
+
+  const fileFromBase64 = (name: string, base64: string, mime: string): File => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new File([bytes], name, { type: mime });
   };
 
   const selectCue = (cueId: string, opts?: { toggle?: boolean }) => {
@@ -1738,6 +1905,76 @@ export function App() {
   const loopRegionValid = isValidLoopRegion(loopA, loopB);
   const loopArmed = loopEnabled && loopRegionValid;
 
+  const toggleShellDrawer = useCallback(
+    (id: "sync" | "generate" | "loop" | "grid") => {
+      setShellDrawer((prev) => (prev === id ? null : id));
+      setHelpOpen(false);
+    },
+    [],
+  );
+
+  const syncChipLabel =
+    syncSource === "internal"
+      ? "Internal"
+      : syncStatus.lock === "locked"
+        ? "Locked"
+        : syncStatus.lock === "freewheel"
+          ? "Freewheel"
+          : syncStatus.lock === "locking"
+            ? "Locking"
+            : "Unlocked";
+
+  const generateChipLabel =
+    generateFlavour === "mtc"
+      ? "MTC stub"
+      : generateStatus.emitting
+        ? "Generating"
+        : generateArmed
+          ? "Armed"
+          : "Disarmed";
+
+  runFileActionRef.current = (payload: CueDesktopFilePayload) => {
+    // Native dialog already chose a file (Electron Open / Open Shared).
+    if (typeof payload === "object") {
+      if (payload.action === "open") {
+        void openProjectFromFile(
+          fileFromBase64(payload.name, payload.base64, "application/json"),
+        );
+        return;
+      }
+      if (payload.action === "open-shared") {
+        void openSharedFromFile(
+          fileFromBase64(payload.name, payload.base64, "application/zip"),
+        );
+        return;
+      }
+    }
+
+    switch (payload) {
+      case "new":
+        onNewProject();
+        break;
+      case "open":
+        // Web / fallback — Electron prefers native dialog + base64 payload.
+        projectInputRef.current?.click();
+        break;
+      case "open-shared":
+        sharePackageInputRef.current?.click();
+        break;
+      case "save":
+        void onSaveProject();
+        break;
+      case "share":
+        void onShareProject();
+        break;
+      case "export":
+        setExportOpen(true);
+        break;
+      default:
+        break;
+    }
+  };
+
   const commitInspectorTime = () => {
     if (inspectorTimeDraft == null || !selectedCueId) {
       setInspectorTimeDraft(null);
@@ -1790,6 +2027,124 @@ export function App() {
           {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen} · ${project.settings.fps}`}
         </div>
         <div className="actions">
+          {!isDesktopShell ? (
+            <div className="file-menu-wrap" ref={fileMenuRef}>
+              <button
+                type="button"
+                className={`file-menu-trigger${fileMenuOpen ? " open" : ""}`}
+                aria-haspopup="menu"
+                aria-expanded={fileMenuOpen}
+                aria-controls="topbar-file-menu"
+                title="File menu (New, Open, Save, Share, Export)"
+                onClick={() => {
+                  setFileMenuOpen((prev) => !prev);
+                  setHelpOpen(false);
+                  setShellDrawer(null);
+                }}
+              >
+                File
+                <span className="file-menu-caret" aria-hidden>
+                  ▾
+                </span>
+              </button>
+              {fileMenuOpen ? (
+                <ul
+                  id="topbar-file-menu"
+                  className="file-menu"
+                  role="menu"
+                  aria-label="File"
+                >
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={editsLocked}
+                      title={editsLocked ? SHOW_MODE_BANNER : "⌘/Ctrl+N"}
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        onNewProject();
+                      }}
+                    >
+                      <span>New</span>
+                      <kbd>⌘N</kbd>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="⌘/Ctrl+O"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        projectInputRef.current?.click();
+                      }}
+                    >
+                      <span>Open…</span>
+                      <kbd>⌘O</kbd>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="Open a teammate’s .cueproj.zip (⌘/Ctrl+Shift+O)"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        sharePackageInputRef.current?.click();
+                      }}
+                    >
+                      <span>Open Shared…</span>
+                      <kbd>⇧⌘O</kbd>
+                    </button>
+                  </li>
+                  <li role="separator" className="file-menu-sep" />
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="⌘/Ctrl+S"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        void onSaveProject();
+                      }}
+                    >
+                      <span>Save</span>
+                      <kbd>⌘S</kbd>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="Download portable .cueproj.zip (⌘/Ctrl+Shift+S)"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        void onShareProject();
+                      }}
+                    >
+                      <span>Share…</span>
+                      <kbd>⇧⌘S</kbd>
+                    </button>
+                  </li>
+                  <li role="separator" className="file-menu-sep" />
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="⌘/Ctrl+E"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        setExportOpen(true);
+                      }}
+                    >
+                      <span>Export…</span>
+                      <kbd>⌘E</kbd>
+                    </button>
+                  </li>
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
           <button
             type="button"
             className={editsLocked ? "mode-toggle show" : "mode-toggle edit"}
@@ -1808,37 +2163,6 @@ export function App() {
             }}
           >
             {editsLocked ? "Show Mode" : "Edit Mode"}
-          </button>
-          <button
-            type="button"
-            onClick={onNewProject}
-            disabled={editsLocked}
-            title={editsLocked ? SHOW_MODE_BANNER : undefined}
-          >
-            New
-          </button>
-          <button type="button" onClick={() => projectInputRef.current?.click()}>
-            Open
-          </button>
-          <button type="button" onClick={onSaveProject}>
-            Save
-          </button>
-          <button
-            type="button"
-            onClick={() => void onShareProject()}
-            title="Download a portable .cueproj.zip (project + media) for USB / Drive / Dropbox handoff"
-          >
-            Share
-          </button>
-          <button
-            type="button"
-            onClick={() => sharePackageInputRef.current?.click()}
-            title="Open a teammate’s .cueproj.zip share package (enters Show Mode by default)"
-          >
-            Open shared
-          </button>
-          <button type="button" onClick={() => setExportOpen(true)}>
-            Export
           </button>
           <button
             type="button"
@@ -1895,7 +2219,9 @@ export function App() {
         </div>
       ) : null}
 
+      <div className="chrome">
       <div className="transport">
+        <div className="transport-primary" aria-label="Transport and next cue">
         <button
           type="button"
           className="primary"
@@ -1957,7 +2283,7 @@ export function App() {
           }
           onChange={(e) => seek(Number(e.target.value))}
         />
-        <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
+        <span className="clock clock-end">
           {clockEnd}
         </span>
         <div
@@ -2014,6 +2340,7 @@ export function App() {
         </div>
         <button
           type="button"
+          className="cue-at-playhead"
           onClick={(e) => placeAtPlayhead(e.altKey)}
           disabled={
             editsLocked || (placeDeptIds.length === 0 && !activeDeptId)
@@ -2026,11 +2353,160 @@ export function App() {
                 : "Place cue at playhead (N). Hold Alt for free placement (Alt+N). Check departments to place on several at once."
           }
         >
-          Cue at playhead
+          Cue
           {placeDeptIds.length > 1 ? ` ×${placeDeptIds.length}` : ""}{" "}
           <kbd>N</kbd>
         </button>
-        <div className="sync-block" aria-label="Timecode sync source">
+        </div>
+        <div className="shell-toggles" aria-label="Secondary panels">
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "sync" ? " open" : ""}${
+              syncSource !== "internal" ? " active-sync" : ""
+            }`}
+            aria-expanded={shellDrawer === "sync"}
+            aria-controls="shell-drawer-sync"
+            title="Timecode sync source (Internal / LTC / MTC)"
+            onClick={() => toggleShellDrawer("sync")}
+          >
+            <span
+              className={`shell-toggle-led sync-lock-${syncStatus.lock}`}
+              aria-hidden
+            >
+              <span className="sync-lock-dot" />
+            </span>
+            Sync
+            <span className="shell-toggle-meta">{syncChipLabel}</span>
+          </button>
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "generate" ? " open" : ""}${
+              generateArmed ? " active-gen" : ""
+            }`}
+            aria-expanded={shellDrawer === "generate"}
+            aria-controls="shell-drawer-generate"
+            title="Outgoing LTC generate (independent of Sync chase)"
+            onClick={() => toggleShellDrawer("generate")}
+          >
+            <span
+              className={`shell-toggle-led${
+                generateStatus.emitting
+                  ? " generate-emitting"
+                  : generateArmed
+                    ? " generate-armed"
+                    : ""
+              }`}
+              aria-hidden
+            >
+              <span className="sync-lock-dot" />
+            </span>
+            Gen
+            <span className="shell-toggle-meta">{generateChipLabel}</span>
+          </button>
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "loop" ? " open" : ""}${
+              loopArmed ? " active-loop" : ""
+            }`}
+            aria-expanded={shellDrawer === "loop"}
+            aria-controls="shell-drawer-loop"
+            title="Rehearsal loop (I / O / L)"
+            onClick={() => toggleShellDrawer("loop")}
+          >
+            Loop
+            <span className="shell-toggle-meta">
+              {loopArmed ? "On" : loopA != null || loopB != null ? "Set" : "Off"}
+            </span>
+          </button>
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "grid" ? " open" : ""}`}
+            aria-expanded={shellDrawer === "grid"}
+            aria-controls="shell-drawer-grid"
+            title="BPM, grid, Click, zoom, Follow"
+            onClick={() => toggleShellDrawer("grid")}
+          >
+            Grid
+            <span className="shell-toggle-meta">
+              {project.settings.bpm} · {zoomLabel}
+            </span>
+          </button>
+          <div className="help-wrap" ref={helpPopoverRef}>
+            <button
+              type="button"
+              className={`shell-toggle help-toggle${helpOpen ? " open" : ""}`}
+              aria-expanded={helpOpen}
+              aria-controls="shell-help-popover"
+              title="Keyboard shortcuts (?)"
+              onClick={() => {
+                setHelpOpen((prev) => !prev);
+                setShellDrawer(null);
+              }}
+            >
+              ?
+            </button>
+            {helpOpen ? (
+              <div
+                id="shell-help-popover"
+                className="help-popover"
+                role="dialog"
+                aria-label="Keyboard shortcuts"
+              >
+                <div className="help-popover-title">Shortcuts</div>
+                <ul className="help-list">
+                  <li>
+                    <kbd>Space</kbd> Play / pause (Internal Sync)
+                  </li>
+                  <li>
+                    <kbd>F</kbd> Follow playhead
+                  </li>
+                  <li>
+                    <kbd>G</kbd> / <kbd>H</kbd> Zoom out / in
+                  </li>
+                  <li>
+                    <kbd>S</kbd> Magnetic snap
+                  </li>
+                  <li>
+                    <kbd>J</kbd> Home (start)
+                  </li>
+                  <li>
+                    <kbd>C</kbd> Click metronome
+                  </li>
+                  <li>
+                    <kbd>N</kbd> Cue at playhead · <kbd>Alt</kbd>+
+                    <kbd>N</kbd> free
+                  </li>
+                  <li>
+                    <kbd>I</kbd> / <kbd>O</kbd> Loop In / Out · <kbd>L</kbd>{" "}
+                    arm loop
+                  </li>
+                  <li>
+                    <kbd>?</kbd> This help · <kbd>Esc</kbd> close panels
+                  </li>
+                  <li>
+                    File: <kbd>⌘N</kbd> New · <kbd>⌘O</kbd> Open ·{" "}
+                    <kbd>⌘S</kbd> Save · <kbd>⌘E</kbd> Export
+                  </li>
+                  <li>
+                    Hold <kbd>Alt</kbd> while placing / dragging to bypass snap
+                  </li>
+                  <li>
+                    <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor
+                  </li>
+                  <li>⌘/Ctrl-click multi-select cues</li>
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {shellDrawer === "sync" ? (
+        <div
+          id="shell-drawer-sync"
+          className="shell-drawer sync-block"
+          aria-label="Timecode sync source"
+        >
           <label className="sync-source-field">
             Sync
             <select
@@ -2207,8 +2683,12 @@ export function App() {
             ) : null}
           </span>
         </div>
+      ) : null}
+
+      {shellDrawer === "generate" ? (
         <div
-          className="sync-block generate-block"
+          id="shell-drawer-generate"
+          className="shell-drawer sync-block generate-block"
           aria-label="Outgoing timecode generate"
         >
           <label className="sync-source-field">
@@ -2388,9 +2868,14 @@ export function App() {
             LTC ≠ FOH
           </span>
         </div>
-      </div>
+      ) : null}
 
-      <div className="rehearsal-bar" aria-label="Rehearsal loop">
+      {shellDrawer === "loop" ? (
+      <div
+        id="shell-drawer-loop"
+        className="shell-drawer rehearsal-bar"
+        aria-label="Rehearsal loop"
+      >
         <span className="rehearsal-title">Loop</span>
         <div
           className="mode-switch"
@@ -2493,8 +2978,14 @@ export function App() {
                 : "Set In / Out, then arm Loop"}
         </span>
       </div>
+      ) : null}
 
-      <div className="grid-bar" aria-label="BPM and snap settings">
+      {shellDrawer === "grid" ? (
+      <div
+        id="shell-drawer-grid"
+        className="shell-drawer grid-bar"
+        aria-label="BPM and snap settings"
+      >
         <label className="grid-field bpm-field">
           BPM
           <input
@@ -2795,15 +3286,8 @@ export function App() {
             </span>
           ) : null}
         </label>
-        <span className="grid-hint">
-          Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
-          <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
-          <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
-          <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
-          <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click ·{" "}
-          <kbd>N</kbd> cue at playhead (checked depts) · <kbd>I</kbd>/<kbd>O</kbd>{" "}
-          loop In/Out · <kbd>L</kbd> loop · ⌘/Ctrl-click multi-select cues
-        </span>
+      </div>
+      ) : null}
       </div>
 
       <div className="workspace">

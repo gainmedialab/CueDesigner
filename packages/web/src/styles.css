@@ -10,8 +10,12 @@
   --danger: #e85d5d;
   --playhead: #f0c14b;
   --track-h: 44px;
-  --font: "DM Sans", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, monospace;
+  /* SF-adjacent on macOS Electron; DM Sans remains the branded web fallback. */
+  --font: -apple-system, BlinkMacSystemFont, "DM Sans", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --chrome-pad-x: 1.25rem;
+  --chrome-gap: 0.65rem;
+  --control-radius: 6px;
   color-scheme: dark;
 }
 
@@ -87,14 +91,18 @@ input[type="color"] {
 }
 
 .app {
+  /* topbar · chrome (transport + optional drawer) · workspace · footer */
   display: grid;
-  grid-template-rows: auto auto auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .app.show-mode {
-  grid-template-rows: auto auto auto auto auto 1fr auto;
+  /* + show-mode banner under topbar */
+  grid-template-rows: auto auto auto 1fr auto;
 }
 
 .show-mode-banner {
@@ -151,10 +159,15 @@ button.mode-toggle.edit {
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 0.75rem 1.25rem;
+  padding: 0.65rem var(--chrome-pad-x);
   border-bottom: 1px solid var(--border);
-  background: rgba(14, 18, 24, 0.85);
+  background: rgba(14, 18, 24, 0.92);
   backdrop-filter: blur(8px);
+  /* Stay below native Electron title-bar / traffic lights; don't invent chrome. */
+  -webkit-app-region: no-drag;
+  /* Stack above chrome/workspace so File menu is not painted under the timeline. */
+  position: relative;
+  z-index: 40;
 }
 
 .brand {
@@ -176,16 +189,337 @@ button.mode-toggle.edit {
 .topbar .actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
+}
+
+/* In-app File menu (web). Electron uses the native application File menu. */
+.file-menu-wrap {
+  position: relative;
+}
+
+.file-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+.file-menu-trigger.open {
+  border-color: #3d4d66;
+  background: #1c2430;
+}
+
+.file-menu-caret {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.file-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 60;
+  min-width: 14.5rem;
+  margin: 0;
+  padding: 0.35rem;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #161c26;
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.file-menu li[role="none"] {
+  margin: 0;
+}
+
+.file-menu button[role="menuitem"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  width: 100%;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-align: left;
+  color: var(--text);
+}
+
+.file-menu button[role="menuitem"]:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.file-menu button[role="menuitem"] kbd {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+.file-menu-sep {
+  height: 1px;
+  margin: 0.3rem 0.4rem;
+  background: var(--border);
+  list-style: none;
+}
+
+/* Transport + progressive-disclosure drawers (HIG: primary always visible). */
+.chrome {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  /* Help popover / drawers stack above the timeline, below topbar File menu. */
+  position: relative;
+  z-index: 20;
 }
 
 .transport {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+  padding: 0.5rem var(--chrome-pad-x) 0.45rem;
+  min-width: 0;
+}
+
+/* Primary actions: Play · clock · scrub · Next · Cue (HIG hierarchy). */
+.transport-primary {
+  display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.65rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
+  gap: var(--chrome-gap);
+  min-width: 0;
+}
+
+.transport-primary > .primary,
+.transport-primary > .mode-switch,
+.transport-primary > .clock-block,
+.transport-primary > .cue-at-playhead {
+  flex-shrink: 0;
+}
+
+.transport-primary .scrub {
+  flex: 1 1 6rem;
+  min-width: 4.5rem;
+}
+
+.transport-primary .clock-end {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  min-width: 0;
+}
+
+.transport-primary .countdown-block {
+  flex: 0 1 16rem;
+  min-width: 11rem;
+}
+
+.transport-primary .cue-at-playhead {
+  white-space: nowrap;
+  padding: 0.35rem 0.65rem;
+}
+
+/* Secondary disclosure chips on their own strip (trailing, not competing). */
+.shell-toggles {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  min-width: 0;
+  padding-top: 0.15rem;
+  border-top: 1px solid rgba(42, 52, 68, 0.65);
+}
+
+.shell-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-muted);
+  background: var(--bg);
+  border-radius: var(--control-radius);
+  max-width: 11rem;
+  white-space: nowrap;
+}
+
+.shell-toggle:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.shell-toggle.open {
+  color: var(--text);
+  border-color: #3d4d66;
+  background: #1c2430;
+  box-shadow: inset 0 0 0 1px rgba(61, 139, 253, 0.35);
+}
+
+.shell-toggle.active-sync,
+.shell-toggle.active-gen,
+.shell-toggle.active-loop {
+  color: var(--text);
+}
+
+.shell-toggle.active-loop {
+  border-color: rgba(240, 193, 75, 0.45);
+}
+
+.shell-toggle.active-gen {
+  border-color: rgba(232, 93, 93, 0.4);
+}
+
+.shell-toggle-meta {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 5.5rem;
+}
+
+.shell-toggle.open .shell-toggle-meta,
+.shell-toggle.active-sync .shell-toggle-meta,
+.shell-toggle.active-gen .shell-toggle-meta,
+.shell-toggle.active-loop .shell-toggle-meta {
+  color: var(--text);
+}
+
+.shell-toggle-led {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.shell-toggle.help-toggle {
+  min-width: 2rem;
+  justify-content: center;
+  font-family: var(--mono);
+  font-weight: 700;
+  padding-left: 0.45rem;
+  padding-right: 0.45rem;
+}
+
+.help-wrap {
+  position: relative;
+}
+
+.help-popover {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 40;
+  width: min(22rem, calc(100vw - 2.5rem));
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.03);
+  color: var(--text);
+}
+
+.help-popover-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.55rem;
+}
+
+.help-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--text);
+}
+
+.help-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.45rem;
+}
+
+.help-list kbd {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.shell-drawer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.75rem;
+  padding: 0.5rem var(--chrome-pad-x) 0.6rem;
+  border-top: 1px solid var(--border);
+  background: rgba(14, 18, 24, 0.55);
+  min-width: 0;
+}
+
+.shell-drawer.sync-block,
+.shell-drawer.generate-block,
+.shell-drawer.rehearsal-bar,
+.shell-drawer.grid-bar {
+  margin: 0;
+  border-bottom: none;
+  padding-left: var(--chrome-pad-x);
+  padding-right: var(--chrome-pad-x);
+}
+
+.shell-drawer.generate-block {
+  margin-left: 0;
+  padding-left: var(--chrome-pad-x);
+  border-left: none;
+}
+
+.shell-toggle-led.generate-armed .sync-lock-dot {
+  background: var(--playhead);
+}
+
+.shell-toggle-led.generate-emitting .sync-lock-dot {
+  background: #3ecf8e;
+}
+
+/* Primary clock / Next read larger than secondary shell chips (HIG hierarchy). */
+.transport .clock-block .clock {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.transport .countdown-block {
+  border-color: #3a4558;
+  background: rgba(14, 18, 24, 0.92);
 }
 
 .clock {
@@ -393,14 +727,15 @@ button.mode-toggle.edit {
 .countdown-block {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.35rem 0.5rem;
   padding: 0.25rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);
   min-width: 0;
-  max-width: 22rem;
+  max-width: 20rem;
+  overflow: hidden;
 }
 
 .countdown-label {
@@ -456,9 +791,7 @@ button.mode-toggle.edit {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.55rem 0.75rem;
-  padding: 0.45rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-  background: rgba(14, 18, 24, 0.92);
+  background: transparent;
 }
 
 .rehearsal-title {
@@ -566,9 +899,7 @@ button.mode-toggle.edit {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.85rem 1.1rem;
-  padding: 0.5rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-  background: rgba(18, 24, 32, 0.95);
+  background: transparent;
 }
 
 .grid-field {
@@ -622,14 +953,7 @@ button.mode-toggle.edit {
   width: 2.75rem;
 }
 
-.grid-hint {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  margin-left: auto;
-}
-
 .grid-field.checkbox kbd,
-.grid-hint kbd,
 .toolbar kbd,
 button kbd {
   font-family: var(--mono);
