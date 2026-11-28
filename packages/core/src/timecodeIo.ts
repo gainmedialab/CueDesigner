@@ -163,7 +163,7 @@ export function frameRateLabelToMtcRateBits(label: FrameRateLabel): number {
 
 /**
  * Encode a frame into eight MTC quarter-frame *data* bytes (status 0xF1 omitted).
- * Each byte is `(type << 4) | nibble` for types 0…7. Stub path for MTC out.
+ * Each byte is `(type << 4) | nibble` for types 0…7. Used by MTC generate.
  */
 export function encodeMtcQuarterFrameData(
   tc: Pick<

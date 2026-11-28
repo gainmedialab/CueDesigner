@@ -175,10 +175,10 @@ Open the **Gen** drawer (chip shows Disarmed / Armed / Generating). **Generate**
 
 | Flavour | Path | Notes |
 |---------|------|--------|
-| **LTC out** (shipped) | Dedicated Web Audio `AudioContext` + `setSinkId` + `ChannelMerger` | Transport-locked: emits only while **Internal** transport is **playing** and **Arm** is on. Pick **Out** device + **Ch**. Uses project **FPS** + **TC offset**. |
-| **MTC out** | Stub | UI option disabled (“soon”); core encode helpers ready for a later MIDI-output slice. |
+| **LTC out** | Dedicated Web Audio `AudioContext` + `setSinkId` + `ChannelMerger` | Transport-locked: emits only while **Internal** transport is **playing** and **Arm** is on. Pick **Out** device + **Ch**. Uses project **FPS** + **TC offset**. |
+| **MTC out** | Web MIDI `MIDIOutput.send` quarter-frames (`0xF1`) | Same transport-locked arm model. Pick **MIDI** output port (IAC / USB / desk). Switching flavour disarms the previous backend so only one outgoing clock is live. |
 
-**Safety:** LTC generate stays **disarmed** by default and uses its own AudioContext (not the show-media path). Prefer a dedicated TC feed (BlackHole, Dante, interface card) — **never** route LTC into FOH or cue monitors. Status shows **LTC ≠ FOH**. When Sync is LTC/MTC chase, file Play is disabled so generate is silent (still transport-locked).
+**Safety:** Generate stays **disarmed** by default. LTC uses its own AudioContext (not the show-media path) — prefer a dedicated TC feed (BlackHole, Dante, interface card) and **never** route LTC into FOH or cue monitors (**LTC ≠ FOH**). MTC targets only the selected MIDI out (**MTC → MIDI**). When Sync is LTC/MTC chase, file Play is disabled so generate is silent (still transport-locked).
 
 ## Show exports (export-only)
 
