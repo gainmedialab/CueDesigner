@@ -72,6 +72,7 @@ npm run typecheck
 - **Audio:** Import WAV / AIFF / MP3 (and common browser-decodable formats); play / pause / scrub
 - **Departments:** Seeded defaults (Pyro/SFX, Lighting, Audio, Cameras) + add / rename / recolour / delete
 - **Cues:** Place at playhead or double-click track; select, drag-move, edit, delete; per-department cue numbers + global ordinal
+- **Multi-dept:** Check **Place on** departments then **N** / Cue at playhead creates one cue per checked dept; **Copy to…** duplicates selected cue(s) onto other departments (same time, new per-dept numbers)
 - **Shell:** Electron loads the same web UI / schema on macOS
 
 ## BPM + magnetic snap (Phase 1)
@@ -103,7 +104,8 @@ Use the **BPM bar** under transport:
 | **S** | Toggle Magnetic snap |
 | **J** | Home — seek playhead to start (same as transport ⇤) |
 | **C** | Toggle Click metronome (auditions a tick when turning on) |
-| **N** | Place cue at playhead (same as **Cue at playhead**; **Alt+N** = free / unsnapped) |
+| **N** | Place cue at playhead on every **Place on** department (same as **Cue at playhead**; **Alt+N** = free / unsnapped) |
+| ⌘/Ctrl-click | Multi-select cues (for **Copy to…** / multi-delete) |
 
 **Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider / **G**/**H** zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). During Internal playback or LTC/MTC chase the timeline **follows the playhead** when **Follow** is on (playhead kept ~35% into the visible lane). The checkbox latches across play/pause; manual scroll temporarily suspends follow (checkbox stays on; **Play** or re-check clears suspension). The waveform redraws for the visible span at device-pixel density, keyed to the same file-relative `tAbs` as the playhead, cues, and grid. Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 

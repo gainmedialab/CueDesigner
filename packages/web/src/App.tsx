@@ -2,6 +2,7 @@ import {
   addDepartment,
   clampBpm,
   clampTimelineZoom,
+  copyCuesToDepartments,
   createCue,
   createId,
   createProject,
@@ -27,6 +28,7 @@ import {
   parseTime,
   parseTimecode,
   placeCue,
+  placeCuesOnDepartments,
   projectDownloadBlob,
   renameDepartment,
   recolorDepartment,
@@ -116,7 +118,17 @@ function applySnap(
 export function App() {
   const [project, setProject] = useState<Project>(() => createProject("Untitled Show"));
   const [activeDeptId, setActiveDeptId] = useState<string>("");
-  const [selectedCueId, setSelectedCueId] = useState<string | null>(null);
+  /**
+   * Departments that receive Cue-at-playhead / N.
+   * Active department stays in the set when clicked; checkboxes add/remove others.
+   */
+  const [placeDeptIds, setPlaceDeptIds] = useState<string[]>([]);
+  /** Multi-select: last id is the inspector primary. */
+  const [selectedCueIds, setSelectedCueIds] = useState<string[]>([]);
+  const selectedCueId = selectedCueIds[selectedCueIds.length - 1] ?? null;
+  /** Department targets for Copy to… (other depts only). */
+  const [copyTargetDeptIds, setCopyTargetDeptIds] = useState<string[]>([]);
+  const [copyPanelOpen, setCopyPanelOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
@@ -271,6 +283,41 @@ export function App() {
       setActiveDeptId(project.departments[0]?.id ?? "");
     }
   }, [project.departments, activeDeptId]);
+
+  // Place-at-playhead targets: prune deleted depts; seed from active when empty
+  useEffect(() => {
+    const valid = new Set(project.departments.map((d) => d.id));
+    setPlaceDeptIds((prev) => {
+      const pruned = prev.filter((id) => valid.has(id));
+      if (pruned.length > 0) {
+        return pruned.length === prev.length ? prev : pruned;
+      }
+      return activeDeptId && valid.has(activeDeptId) ? [activeDeptId] : [];
+    });
+  }, [project.departments, activeDeptId]);
+
+  // Drop stale cue selection when cues are deleted
+  useEffect(() => {
+    const valid = new Set(project.cues.map((c) => c.id));
+    setSelectedCueIds((prev) => {
+      const next = prev.filter((id) => valid.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [project.cues]);
+
+  // Close / prune Copy to… when selection or departments change
+  useEffect(() => {
+    const valid = new Set(project.departments.map((d) => d.id));
+    setCopyTargetDeptIds((prev) => {
+      const next = prev.filter((id) => valid.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [project.departments]);
+
+  useEffect(() => {
+    setCopyPanelOpen(false);
+    setCopyTargetDeptIds([]);
+  }, [selectedCueIds]);
 
   // Drop in-progress time drafts when the target or mode changes
   useEffect(() => {
@@ -1090,8 +1137,13 @@ export function App() {
     try {
       const text = await file.text();
       const { project: loaded, mediaDataUrl } = deserializeProject(text);
-      setSelectedCueId(null);
+      setSelectedCueIds([]);
+      setCopyPanelOpen(false);
+      setCopyTargetDeptIds([]);
       setActiveDeptId(loaded.departments[0]?.id ?? "");
+      setPlaceDeptIds(
+        loaded.departments[0]?.id ? [loaded.departments[0].id] : [],
+      );
       setPlaying(false);
       setCurrentTime(0);
       setProject(loaded);
@@ -1143,7 +1195,10 @@ export function App() {
     const p = createProject("Untitled Show");
     setProject(p);
     setActiveDeptId(p.departments[0]?.id ?? "");
-    setSelectedCueId(null);
+    setPlaceDeptIds(p.departments[0]?.id ? [p.departments[0].id] : []);
+    setSelectedCueIds([]);
+    setCopyPanelOpen(false);
+    setCopyTargetDeptIds([]);
     setPlaying(false);
     setCurrentTime(0);
     setStatus("New project created.");
@@ -1211,8 +1266,13 @@ export function App() {
       const parsed = parseSharePackage(zipEntries);
       const loaded = parsed.project;
 
-      setSelectedCueId(null);
+      setSelectedCueIds([]);
+      setCopyPanelOpen(false);
+      setCopyTargetDeptIds([]);
       setActiveDeptId(loaded.departments[0]?.id ?? "");
+      setPlaceDeptIds(
+        loaded.departments[0]?.id ? [loaded.departments[0].id] : [],
+      );
       setPlaying(false);
       setCurrentTime(0);
       setProject(loaded);
@@ -1274,24 +1334,48 @@ export function App() {
     }
   };
 
-  const placeAtPlayhead = (bypassSnap = false) => {
-    if (!activeDeptId) return;
-    const tAbs = applySnap(currentTime, project.settings, bypassSnap);
-    const draft = createCue({
-      id: createId(),
-      tAbs,
-      departmentId: activeDeptId,
-      cueNoDept: nextDeptCueNumber(project.cues, activeDeptId),
-      label: "Cue",
+  const selectCue = (cueId: string, opts?: { toggle?: boolean }) => {
+    setSelectedCueIds((prev) => {
+      if (opts?.toggle) {
+        if (prev.includes(cueId)) {
+          return prev.filter((id) => id !== cueId);
+        }
+        return [...prev, cueId];
+      }
+      return [cueId];
     });
-    setProject((p) =>
-      touchProject({ ...p, cues: placeCue(p.cues, draft) }),
+  };
+
+  const placeAtPlayhead = (bypassSnap = false) => {
+    const targets =
+      placeDeptIds.length > 0
+        ? placeDeptIds
+        : activeDeptId
+          ? [activeDeptId]
+          : [];
+    if (targets.length === 0) return;
+    const tAbs = applySnap(currentTime, project.settings, bypassSnap);
+    // Build outside setState so Strict Mode cannot double-run idFactory.
+    const { cues: nextCues, createdIds } = placeCuesOnDepartments(
+      project.cues,
+      {
+        tAbs,
+        departmentIds: targets,
+        idFactory: createId,
+        label: "Cue",
+      },
     );
-    setSelectedCueId(draft.id);
+    if (createdIds.length === 0) return;
+    setProject((p) => touchProject({ ...p, cues: nextCues }));
+    setSelectedCueIds(createdIds);
+    const snapNote =
+      bypassSnap || !project.settings.snapEnabled ? " — free" : " — snapped";
+    const deptNote =
+      createdIds.length > 1
+        ? ` on ${createdIds.length} departments`
+        : "";
     setStatus(
-      `Placed cue at ${formatTime(tAbs, timeMode, project.settings)}${
-        bypassSnap || !project.settings.snapEnabled ? " — free" : " — snapped"
-      }`,
+      `Placed cue${createdIds.length > 1 ? "s" : ""} at ${formatTime(tAbs, timeMode, project.settings)}${deptNote}${snapNote}`,
     );
   };
   placeAtPlayheadRef.current = placeAtPlayhead;
@@ -1302,7 +1386,7 @@ export function App() {
     const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
     const rawT = lanePercentToTime(ratio * 100, duration || 1);
     if (e.detail === 2) {
-      // double-click places cue (Alt bypasses snap)
+      // double-click places cue on that track only (Alt bypasses snap)
       const tAbs = applySnap(rawT, project.settings, e.altKey);
       const draft = createCue({
         id: createId(),
@@ -1313,12 +1397,18 @@ export function App() {
       setProject((p) =>
         touchProject({ ...p, cues: placeCue(p.cues, draft) }),
       );
-      setSelectedCueId(draft.id);
+      setSelectedCueIds([draft.id]);
       setActiveDeptId(deptId);
+      setPlaceDeptIds((prev) =>
+        prev.includes(deptId) ? prev : [...prev, deptId],
+      );
       return;
     }
     seek(rawT);
     setActiveDeptId(deptId);
+    setPlaceDeptIds((prev) =>
+      prev.includes(deptId) ? prev : [...prev, deptId],
+    );
   };
 
   const onCuePointerDown = (
@@ -1330,8 +1420,11 @@ export function App() {
     e.preventDefault();
     if (e.button !== 0) return;
 
-    setSelectedCueId(cue.id);
+    selectCue(cue.id, { toggle: e.metaKey || e.ctrlKey });
     setActiveDeptId(cue.departmentId);
+    setPlaceDeptIds((prev) =>
+      prev.includes(cue.departmentId) ? prev : [...prev, cue.departmentId],
+    );
     dragCueIdRef.current = cue.id;
 
     const marker = e.currentTarget;
@@ -1593,10 +1686,16 @@ export function App() {
         <button
           type="button"
           onClick={(e) => placeAtPlayhead(e.altKey)}
-          disabled={!activeDeptId}
-          title="Place cue at playhead (N). Hold Alt for free placement (Alt+N)."
+          disabled={placeDeptIds.length === 0 && !activeDeptId}
+          title={
+            placeDeptIds.length > 1
+              ? `Place one cue per selected department at playhead (${placeDeptIds.length} depts). Hold Alt for free placement (Alt+N).`
+              : "Place cue at playhead (N). Hold Alt for free placement (Alt+N). Check departments to place on several at once."
+          }
         >
-          Cue at playhead <kbd>N</kbd>
+          Cue at playhead
+          {placeDeptIds.length > 1 ? ` ×${placeDeptIds.length}` : ""}{" "}
+          <kbd>N</kbd>
         </button>
         <div className="sync-block" aria-label="Timecode sync source">
           <label className="sync-source-field">
@@ -2228,20 +2327,59 @@ export function App() {
           <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
           <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
           <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click ·{" "}
-          <kbd>N</kbd> cue at playhead
+          <kbd>N</kbd> cue at playhead (checked depts) · ⌘/Ctrl-click multi-select cues
         </span>
       </div>
 
       <div className="workspace">
         <aside className="panel">
           <h2>Departments</h2>
+          <p className="dept-place-legend" title="Checked departments receive Cue at playhead / N">
+            Place on
+          </p>
           <ul className="dept-list">
-            {project.departments.map((d) => (
+            {project.departments.map((d) => {
+              const placeOn = placeDeptIds.includes(d.id);
+              return (
               <li
                 key={d.id}
-                className={`dept-item${d.id === activeDeptId ? " active" : ""}`}
-                onClick={() => setActiveDeptId(d.id)}
+                className={`dept-item${d.id === activeDeptId ? " active" : ""}${placeOn ? " place-on" : ""}`}
+                onClick={() => {
+                  setActiveDeptId(d.id);
+                  setPlaceDeptIds((prev) =>
+                    prev.includes(d.id) ? prev : [...prev, d.id],
+                  );
+                }}
               >
+                <label
+                  className="dept-place-check"
+                  title="Include in Cue at playhead / N"
+                  onClick={(ev) => ev.stopPropagation()}
+                >
+                  <input
+                    type="checkbox"
+                    checked={placeOn}
+                    aria-label={`Place cues on ${d.name}`}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setPlaceDeptIds((prev) => {
+                        if (on) {
+                          return prev.includes(d.id) ? prev : [...prev, d.id];
+                        }
+                        const next = prev.filter((id) => id !== d.id);
+                        // Keep at least the active department when unchecking others
+                        if (next.length === 0 && activeDeptId === d.id) {
+                          return [d.id];
+                        }
+                        if (next.length === 0 && activeDeptId) {
+                          return [activeDeptId];
+                        }
+                        return next;
+                      });
+                      if (on) setActiveDeptId(d.id);
+                    }}
+                  />
+                </label>
                 <span className="dept-swatch" style={{ background: d.color }} />
                 <span>{d.name}</span>
                 <button
@@ -2257,13 +2395,19 @@ export function App() {
                         cues: deleteCuesForDepartment(p.cues, d.id),
                       }),
                     );
-                    if (selectedCue?.departmentId === d.id) setSelectedCueId(null);
+                    setSelectedCueIds((prev) =>
+                      prev.filter((id) => {
+                        const cue = project.cues.find((c) => c.id === id);
+                        return cue?.departmentId !== d.id;
+                      }),
+                    );
                   }}
                 >
                   ×
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
           <div className="dept-form">
             <input
@@ -2342,8 +2486,10 @@ export function App() {
             )}
           </div>
           <p className="hint">
-            Double-click a track to place a cue. Hold Alt for free (unsnapped)
-            placement.
+            Check departments under Place on, then <kbd>N</kbd> / Cue at
+            playhead creates one cue per checked dept. Double-click a track to
+            place on that track only. Hold Alt for free (unsnapped) placement.
+            Select a cue → Copy to… for other departments.
           </p>
         </aside>
 
@@ -2405,7 +2551,7 @@ export function App() {
                           return (
                             <div
                               key={c.id}
-                              className={`cue-marker${c.id === selectedCueId ? " selected" : ""}`}
+                              className={`cue-marker${selectedCueIds.includes(c.id) ? " selected" : ""}`}
                               style={{ left, background: d.color }}
                               title={`${c.cueNoDept} ${c.label} · ${formatTime(c.tAbs, timeMode, project.settings)}`}
                               onPointerDown={(e) => onCuePointerDown(e, c)}
@@ -2434,9 +2580,9 @@ export function App() {
                 return (
                   <li
                     key={c.id}
-                    className={`cue-row${c.id === selectedCueId ? " selected" : ""}`}
-                    onClick={() => {
-                      setSelectedCueId(c.id);
+                    className={`cue-row${selectedCueIds.includes(c.id) ? " selected" : ""}`}
+                    onClick={(e) => {
+                      selectCue(c.id, { toggle: e.metaKey || e.ctrlKey });
                       seek(c.tAbs);
                     }}
                   >
@@ -2452,9 +2598,16 @@ export function App() {
                 );
               })}
           </ul>
-          {selectedCue && (
+          {selectedCueIds.length > 0 && (
             <div className="inspector">
-              <h2>Inspector</h2>
+              <h2>
+                Inspector
+                {selectedCueIds.length > 1
+                  ? ` · ${selectedCueIds.length} selected`
+                  : ""}
+              </h2>
+              {selectedCue && selectedCueIds.length === 1 && (
+                <>
               <label>
                 Label
                 <input
@@ -2550,20 +2703,153 @@ export function App() {
               >
                 Snap to grid
               </button>
+                </>
+              )}
+              {selectedCueIds.length > 1 && (
+                <p className="hint">
+                  Multi-select: Copy to… duplicates all selected cues onto other
+                  departments. Edit label/time on a single selection.
+                </p>
+              )}
+              <div className="copy-to-panel">
+                {!copyPanelOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const sourceDeptIds = new Set(
+                        selectedCueIds
+                          .map(
+                            (id) =>
+                              project.cues.find((c) => c.id === id)
+                                ?.departmentId,
+                          )
+                          .filter((id): id is string => Boolean(id)),
+                      );
+                      // Pre-check every department that is not the sole source
+                      // of the whole selection (same-dept targets are skipped).
+                      const soleSource =
+                        sourceDeptIds.size === 1
+                          ? [...sourceDeptIds][0]!
+                          : null;
+                      setCopyTargetDeptIds(
+                        project.departments
+                          .map((d) => d.id)
+                          .filter((id) => id !== soleSource),
+                      );
+                      setCopyPanelOpen(true);
+                    }}
+                    disabled={project.departments.length < 2}
+                    title="Duplicate selected cue(s) onto other departments at the same time"
+                  >
+                    Copy to…
+                  </button>
+                ) : (
+                  <>
+                    <p className="copy-to-label">Copy to departments</p>
+                    <ul className="copy-to-list">
+                      {project.departments.map((d) => {
+                        const allFromThisDept = selectedCueIds.every((id) => {
+                          const cue = project.cues.find((c) => c.id === id);
+                          return cue?.departmentId === d.id;
+                        });
+                        return (
+                          <li key={d.id}>
+                            <label
+                              className={`export-check${allFromThisDept ? " muted" : ""}`}
+                              title={
+                                allFromThisDept
+                                  ? "Source department — skipped (same-dept copy not needed)"
+                                  : `Copy onto ${d.name}`
+                              }
+                            >
+                              <input
+                                type="checkbox"
+                                checked={copyTargetDeptIds.includes(d.id)}
+                                disabled={allFromThisDept}
+                                onChange={(e) => {
+                                  const on = e.target.checked;
+                                  setCopyTargetDeptIds((prev) =>
+                                    on
+                                      ? prev.includes(d.id)
+                                        ? prev
+                                        : [...prev, d.id]
+                                      : prev.filter((id) => id !== d.id),
+                                  );
+                                }}
+                              />
+                              <span
+                                className="dept-swatch"
+                                style={{ background: d.color }}
+                              />
+                              <span>{d.name}</span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    <div className="copy-to-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={
+                          copyTargetDeptIds.length === 0 ||
+                          selectedCueIds.length === 0
+                        }
+                        onClick={() => {
+                          const sourceCount = selectedCueIds.length;
+                          const { cues: nextCues, createdIds } =
+                            copyCuesToDepartments(project.cues, {
+                              sourceCueIds: selectedCueIds,
+                              targetDepartmentIds: copyTargetDeptIds,
+                              idFactory: createId,
+                            });
+                          if (createdIds.length === 0) {
+                            setStatus(
+                              "Copy to…: nothing to copy (pick other departments).",
+                            );
+                            return;
+                          }
+                          setProject((p) =>
+                            touchProject({ ...p, cues: nextCues }),
+                          );
+                          setSelectedCueIds(createdIds);
+                          setCopyPanelOpen(false);
+                          setCopyTargetDeptIds([]);
+                          setStatus(
+                            `Copied ${sourceCount} cue${sourceCount === 1 ? "" : "s"} → ${createdIds.length} new cue${createdIds.length === 1 ? "" : "s"} on other departments.`,
+                          );
+                        }}
+                      >
+                        Copy
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCopyPanelOpen(false);
+                          setCopyTargetDeptIds([]);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
               <button
                 type="button"
                 className="danger"
                 onClick={() => {
-                  setProject((p) =>
-                    touchProject({
-                      ...p,
-                      cues: deleteCue(p.cues, selectedCue.id),
-                    }),
-                  );
-                  setSelectedCueId(null);
+                  setProject((p) => {
+                    let cues = p.cues;
+                    for (const id of selectedCueIds) {
+                      cues = deleteCue(cues, id);
+                    }
+                    return touchProject({ ...p, cues });
+                  });
+                  setSelectedCueIds([]);
                 }}
               >
-                Delete cue
+                Delete cue{selectedCueIds.length > 1 ? "s" : ""}
               </button>
             </div>
           )}
