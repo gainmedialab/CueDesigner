@@ -52,6 +52,7 @@ const packed = buildSharePackage({
 });
 
 assert.equal(packed.includedMedia, true);
+assert.equal(packed.preferShowMode, true, "Share defaults preferShowMode for SM/desk");
 assert.match(packed.filename, /\.cueproj\.zip$/);
 assert.ok(packed.entries.some((e) => e.filename === SHARE_PROJECT_PATH));
 assert.ok(packed.entries.some((e) => e.filename === SHARE_README_PATH));
@@ -70,6 +71,7 @@ const asMap = new Map(
 );
 
 const parsed = parseSharePackage(asMap);
+assert.equal(parsed.preferShowMode, true);
 assert.equal(parsed.project.name, "Share Test Show");
 assert.equal(parsed.project.cues.length, 2);
 assert.equal(parsed.project.cues[0].label, "Hit");

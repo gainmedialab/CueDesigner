@@ -206,9 +206,24 @@ Sharing is **file-based** (USB / NAS / Drive / Dropbox). No accounts, no realtim
 | Action | What happens |
 |--------|----------------|
 | **Share** | Downloads a portable `ShowName.cueproj.zip` with `project.json`, optional `media/<track>`, and `README.txt` (how to open + conflict guidance). Media is packed at full size when loaded in the session (no 8 MiB embed cap). |
-| **Open shared** | Picks a `.cueproj.zip` / `.zip`, restores cues + settings, and reloads packed media when present. If media is missing, the status line prompts **Import audio**. |
+| **Open shared** | Picks a `.cueproj.zip` / `.zip`, restores cues + settings, and reloads packed media when present. If media is missing, the status line prompts **Import audio**. Enters **Show Mode** by default (honor `preferShowMode` in `project.json`). |
 
 **Handoff rules:** prefer one show master; Share → send zip → teammate Open shared. Do not edit the same cloud-synced file from two machines at once (last writer wins). Local **Save** / **Open** (`.cueproj.json`) stay unchanged for single-operator work.
+
+## Show Mode (edits locked)
+
+Floor / SM / desk use: lock destructive programming while keeping operate tools.
+
+| Mode | Behavior |
+|------|----------|
+| **Show Mode** | Blocks create/move/delete cues, Copy to…, department add/rename/recolour/delete, BPM/grid/FPS/TC-offset edits, New, Import audio. **N** / double-click place / cue drag blocked. Banner: **Show Mode — edits locked**. |
+| **Still allowed** | Transport, Follow, zoom, time-display mode, Sync chase, Generate arm, rehearsal loop / countdown, Click, Save / Share / Export, Open / Open shared. |
+| **Toggle** | Top-bar **Edit Mode** / **Show Mode** button. Exit asks for confirm. Banner **Exit to Edit Mode** does the same. |
+| **Open shared** | Defaults to Show Mode. Package `preferShowMode: false` opens in Edit Mode. Local **Open** (`.cueproj.json`) stays Edit Mode. |
+
+```bash
+npm run test:show-mode
+```
 
 ```text
 My_Show.cueproj.zip

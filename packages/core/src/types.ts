@@ -107,4 +107,10 @@ export interface ProjectFile {
   project: Project;
   /** Optional base64 or omitted when media is external / browser File */
   mediaDataUrl?: string;
+  /**
+   * When present on a share package / project file, Open shared honors this:
+   * true/omitted → enter Show Mode (view-only); false → open in Edit Mode.
+   * Session Show Mode itself is not persisted in project.settings.
+   */
+  preferShowMode?: boolean;
 }

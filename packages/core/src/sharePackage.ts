@@ -33,11 +33,18 @@ export interface BuiltSharePackage {
   entries: SharePackageEntry[];
   /** True when media bytes were packed under media/ */
   includedMedia: boolean;
+  /** Echo of preferShowMode written into project.json when set */
+  preferShowMode?: boolean;
 }
 
 export interface ParsedSharePackage {
   project: Project;
   mediaDataUrl?: string;
+  /**
+   * From project.json — Open shared uses this via resolveSharedOpenEditMode.
+   * undefined/true → Show Mode; false → Edit Mode.
+   */
+  preferShowMode?: boolean;
   /** Binary media extracted from the package media/ folder when present */
   media?: SharePackageMedia;
   /** Paths found in the archive (for diagnostics) */
@@ -118,6 +125,8 @@ CueDesigner MVP sharing is **file-based**, not realtime multiplayer.
 
 - Prefer one **show master** who owns the latest package.
 - Hand off via USB / NAS / Drive / Dropbox: Share → send zip → teammate Open shared.
+- **Open shared** enters **Show Mode** by default (edits locked) for SM / desk.
+  Exit Show Mode in the app when you need to program. Packages may set preferShowMode.
 - Do **not** edit the same Dropbox/Drive copy from two machines at once.
   Last writer wins and silent overwrites are easy; instead Share a new package after your pass.
 - Keep department exports (MagicQ / grandMA / SFX) separate from the master show package.
@@ -139,11 +148,18 @@ export function buildSharePackage(options: {
   mediaBytes?: Uint8Array | null;
   mediaName?: string;
   mediaMimeType?: string;
+  /**
+   * Written into project.json. Open shared honors via resolveSharedOpenEditMode.
+   * Default true (SM/desk view-only) when omitted.
+   */
+  preferShowMode?: boolean;
 }): BuiltSharePackage {
   const touched = touchProject(options.project);
   let project = touched;
   const entries: SharePackageEntry[] = [];
   let includedMedia = false;
+  const preferShowMode =
+    options.preferShowMode === undefined ? true : options.preferShowMode;
 
   if (options.mediaBytes && options.mediaBytes.byteLength > 0) {
     const mediaMeta: MediaRef = {
@@ -174,7 +190,7 @@ export function buildSharePackage(options: {
   // binary lives under media/ for teammate handoff).
   entries.unshift({
     filename: SHARE_PROJECT_PATH,
-    content: serializeProject(project),
+    content: serializeProject(project, undefined, preferShowMode),
   });
   entries.push({
     filename: SHARE_README_PATH,
@@ -182,7 +198,7 @@ export function buildSharePackage(options: {
   });
 
   const filename = `${sanitizeShareBasename(project.name)}${SHARE_PACKAGE_EXTENSION}`;
-  return { filename, entries, includedMedia };
+  return { filename, entries, includedMedia, preferShowMode };
 }
 
 function normalizeZipPath(name: string): string {
@@ -287,6 +303,7 @@ export function parseSharePackage(
   return {
     project: file.project,
     mediaDataUrl: file.mediaDataUrl,
+    preferShowMode: file.preferShowMode,
     media,
     entryNames: [...files.keys()],
   };

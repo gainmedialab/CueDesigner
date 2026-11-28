@@ -8,4 +8,5 @@ export * from "./time.js";
 export * from "./timecodeIo.js";
 export * from "./grid.js";
 export * from "./rehearsal.js";
+export * from "./showMode.js";
 export * from "./export/index.js";

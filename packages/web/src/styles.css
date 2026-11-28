@@ -93,6 +93,60 @@ input[type="color"] {
   min-height: 0;
 }
 
+.app.show-mode {
+  grid-template-rows: auto auto auto auto auto 1fr auto;
+}
+
+.show-mode-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+  padding: 0.45rem 1.25rem;
+  border-bottom: 1px solid #5a4a1a;
+  background: linear-gradient(
+    90deg,
+    rgba(240, 193, 75, 0.16),
+    rgba(240, 193, 75, 0.06)
+  );
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.show-mode-banner-text {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--playhead);
+}
+
+.show-mode-banner-hint {
+  color: var(--text-muted);
+  flex: 1;
+  min-width: 12rem;
+}
+
+button.show-mode-exit {
+  border-color: #8a7428;
+  background: rgba(240, 193, 75, 0.12);
+  font-weight: 600;
+}
+
+button.show-mode-exit:hover:not(:disabled) {
+  border-color: var(--playhead);
+  background: rgba(240, 193, 75, 0.22);
+}
+
+button.mode-toggle.show {
+  border-color: #8a7428;
+  background: rgba(240, 193, 75, 0.18);
+  color: var(--playhead);
+  font-weight: 700;
+}
+
+button.mode-toggle.edit {
+  font-weight: 600;
+}
+
 .topbar {
   display: flex;
   align-items: center;
