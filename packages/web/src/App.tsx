@@ -43,8 +43,13 @@ import {
   recolorDepartment,
   rehearsalLoopModeLabel,
   REHEARSAL_LOOP_MODES,
+  resolveSharedOpenEditMode,
   rulerMarkTimes,
   setProjectMedia,
+  SHOW_MODE_BANNER,
+  SHOW_MODE_EXIT_CONFIRM,
+  canMutateShow,
+  showModeBlockedStatus,
   snapToGrid,
   SYNC_CLOCK_SOURCES,
   TIME_DISPLAY_MODES,
@@ -55,12 +60,14 @@ import {
   touchProject,
   updateCue,
   updateSettings,
+  type AppEditMode,
   type CountdownDeptScope,
   type Cue,
   type FrameRateLabel,
   type GridResolution,
   type Project,
   type RehearsalLoopMode,
+  type ShowModeLockedAction,
   type SyncClockSource,
   type SyncStatusSnapshot,
   type TimeDisplayMode,
@@ -198,6 +205,12 @@ export function App() {
   /** Next-cue countdown department filter (All / Active / Place on). */
   const [countdownScope, setCountdownScope] =
     useState<CountdownDeptScope>("all");
+  /**
+   * Session Show Mode — locks destructive edits (cues/depts/BPM/grid/import).
+   * Open shared enters Show Mode by default (honor preferShowMode flag).
+   */
+  const [editMode, setEditMode] = useState<AppEditMode>("edit");
+  const editsLocked = editMode === "show";
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -249,6 +262,8 @@ export function App() {
   loopARef.current = loopA;
   const loopBRef = useRef(loopB);
   loopBRef.current = loopB;
+  const editModeRef = useRef(editMode);
+  editModeRef.current = editMode;
   const loopModeRef = useRef(loopMode);
   loopModeRef.current = loopMode;
   const lastWaveScrollSyncMsRef = useRef(0);
@@ -971,6 +986,32 @@ export function App() {
   const lastPlaceCueShortcutMsRef = useRef(0);
   const placeAtPlayheadRef = useRef<(bypassSnap?: boolean) => void>(() => undefined);
 
+  /** Returns false when Show Mode blocks the action (and sets status). */
+  const allowShowEdit = useCallback(
+    (action: ShowModeLockedAction, label: string): boolean => {
+      if (canMutateShow(editModeRef.current, action)) return true;
+      setStatus(showModeBlockedStatus(label));
+      return false;
+    },
+    [],
+  );
+
+  const enterShowMode = useCallback((reason?: string) => {
+    setEditMode("show");
+    setCopyPanelOpen(false);
+    setStatus(
+      reason
+        ? `${SHOW_MODE_BANNER}. ${reason}`
+        : `${SHOW_MODE_BANNER}. Transport / Follow / zoom / Sync / Generate / loop / Export still work.`,
+    );
+  }, []);
+
+  const requestExitShowMode = useCallback(() => {
+    if (!window.confirm(SHOW_MODE_EXIT_CONFIRM)) return;
+    setEditMode("edit");
+    setStatus("Edit Mode — edits unlocked.");
+  }, []);
+
   const toggleClickFromShortcut = useCallback(() => {
     const now = performance.now();
     if (now - lastClickShortcutMsRef.current < 80) return;
@@ -988,6 +1029,10 @@ export function App() {
     const now = performance.now();
     if (now - lastPlaceCueShortcutMsRef.current < 80) return;
     lastPlaceCueShortcutMsRef.current = now;
+    if (editModeRef.current === "show") {
+      setStatus(showModeBlockedStatus("create cue"));
+      return;
+    }
     placeAtPlayheadRef.current(bypassSnap);
   }, []);
 
@@ -1086,6 +1131,10 @@ export function App() {
         return;
       }
       if (action === "snap") {
+        if (editModeRef.current === "show") {
+          setStatus(showModeBlockedStatus("snap settings"));
+          return;
+        }
         setProject((p) =>
           updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
         );
@@ -1196,6 +1245,7 @@ export function App() {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
+    if (!allowShowEdit("importAudio", "import audio")) return;
     try {
       setStatus(`Loading ${file.name}…`);
       const loaded = await loadAudioFile(file);
@@ -1286,6 +1336,7 @@ export function App() {
       setPlaying(false);
       setCurrentTime(0);
       setProject(loaded);
+      setEditMode("edit");
 
       let restored = false;
       let missingPrompt = false;
@@ -1328,11 +1379,13 @@ export function App() {
   };
 
   const onNewProject = () => {
+    if (!allowShowEdit("newProject", "new project")) return;
     const previousId = project.id;
     clearPlaybackMedia();
     void deleteProjectMedia(previousId).catch(() => undefined);
     const p = createProject("Untitled Show");
     setProject(p);
+    setEditMode("edit");
     setActiveDeptId(p.departments[0]?.id ?? "");
     setPlaceDeptIds(p.departments[0]?.id ? [p.departments[0].id] : []);
     setSelectedCueIds([]);
@@ -1415,6 +1468,9 @@ export function App() {
       setPlaying(false);
       setCurrentTime(0);
       setProject(loaded);
+      const sharedMode = resolveSharedOpenEditMode(parsed.preferShowMode);
+      setEditMode(sharedMode);
+      setCopyPanelOpen(false);
 
       let restored = false;
       let missingPrompt = false;
@@ -1457,8 +1513,12 @@ export function App() {
         }
       }
 
+      const modeNote =
+        sharedMode === "show"
+          ? ` ${SHOW_MODE_BANNER}.`
+          : " Opened in Edit Mode (package preferShowMode=false).";
       setStatus(
-        `Opened shared show ${loaded.name} (${loaded.cues.length} cues).${
+        `Opened shared show ${loaded.name} (${loaded.cues.length} cues).${modeNote}${
           restored
             ? " Audio restored from package — play/scrub ready."
             : missingPrompt
@@ -1486,6 +1546,7 @@ export function App() {
   };
 
   const placeAtPlayhead = (bypassSnap = false) => {
+    if (!allowShowEdit("createCue", "create cue")) return;
     const targets =
       placeDeptIds.length > 0
         ? placeDeptIds
@@ -1525,6 +1586,7 @@ export function App() {
     const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
     const rawT = lanePercentToTime(ratio * 100, duration || 1);
     if (e.detail === 2) {
+      if (!allowShowEdit("createCue", "create cue")) return;
       // double-click places cue on that track only (Alt bypasses snap)
       const tAbs = applySnap(rawT, project.settings, e.altKey);
       const draft = createCue({
@@ -1564,6 +1626,8 @@ export function App() {
     setPlaceDeptIds((prev) =>
       prev.includes(cue.departmentId) ? prev : [...prev, cue.departmentId],
     );
+    // Show Mode: select only — no drag-move
+    if (editsLocked) return;
     dragCueIdRef.current = cue.id;
 
     const marker = e.currentTarget;
@@ -1679,6 +1743,10 @@ export function App() {
       setInspectorTimeDraft(null);
       return;
     }
+    if (!allowShowEdit("moveCue", "move cue")) {
+      setInspectorTimeDraft(null);
+      return;
+    }
     const parsed = parseTime(
       inspectorTimeDraft,
       timeMode,
@@ -1697,6 +1765,10 @@ export function App() {
 
   const commitTcOffset = () => {
     if (tcOffsetDraft == null) return;
+    if (!allowShowEdit("projectSettings", "TC offset")) {
+      setTcOffsetDraft(null);
+      return;
+    }
     const parsed = parseTimecode(tcOffsetDraft, project.settings.fps);
     if (parsed != null) {
       setProject((p) =>
@@ -1707,7 +1779,7 @@ export function App() {
   };
 
   return (
-    <div className="app">
+    <div className={`app${editsLocked ? " show-mode" : ""}`}>
       <header className="topbar">
         <div className="brand">
           Cue<span>Designer</span>
@@ -1718,7 +1790,31 @@ export function App() {
           {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen} · ${project.settings.fps}`}
         </div>
         <div className="actions">
-          <button type="button" onClick={onNewProject}>
+          <button
+            type="button"
+            className={editsLocked ? "mode-toggle show" : "mode-toggle edit"}
+            aria-pressed={editsLocked}
+            title={
+              editsLocked
+                ? "Show Mode on — click to exit and unlock edits"
+                : "Enter Show Mode — lock destructive edits for SM / desk"
+            }
+            onClick={() => {
+              if (editsLocked) {
+                requestExitShowMode();
+              } else {
+                enterShowMode();
+              }
+            }}
+          >
+            {editsLocked ? "Show Mode" : "Edit Mode"}
+          </button>
+          <button
+            type="button"
+            onClick={onNewProject}
+            disabled={editsLocked}
+            title={editsLocked ? SHOW_MODE_BANNER : undefined}
+          >
             New
           </button>
           <button type="button" onClick={() => projectInputRef.current?.click()}>
@@ -1737,7 +1833,7 @@ export function App() {
           <button
             type="button"
             onClick={() => sharePackageInputRef.current?.click()}
-            title="Open a teammate’s .cueproj.zip share package"
+            title="Open a teammate’s .cueproj.zip share package (enters Show Mode by default)"
           >
             Open shared
           </button>
@@ -1747,6 +1843,8 @@ export function App() {
           <button
             type="button"
             className="primary"
+            disabled={editsLocked}
+            title={editsLocked ? SHOW_MODE_BANNER : undefined}
             onClick={() => audioInputRef.current?.click()}
           >
             Import audio
@@ -1774,6 +1872,28 @@ export function App() {
           />
         </div>
       </header>
+
+      {editsLocked ? (
+        <div
+          className="show-mode-banner"
+          role="status"
+          aria-live="polite"
+          data-testid="show-mode-banner"
+        >
+          <span className="show-mode-banner-text">{SHOW_MODE_BANNER}</span>
+          <span className="show-mode-banner-hint">
+            Transport, Follow, zoom, Sync, Generate, loop, countdown, Click, and
+            Export stay available.
+          </span>
+          <button
+            type="button"
+            className="show-mode-exit"
+            onClick={requestExitShowMode}
+          >
+            Exit to Edit Mode
+          </button>
+        </div>
+      ) : null}
 
       <div className="transport">
         <button
@@ -1895,11 +2015,15 @@ export function App() {
         <button
           type="button"
           onClick={(e) => placeAtPlayhead(e.altKey)}
-          disabled={placeDeptIds.length === 0 && !activeDeptId}
+          disabled={
+            editsLocked || (placeDeptIds.length === 0 && !activeDeptId)
+          }
           title={
-            placeDeptIds.length > 1
-              ? `Place one cue per selected department at playhead (${placeDeptIds.length} depts). Hold Alt for free placement (Alt+N).`
-              : "Place cue at playhead (N). Hold Alt for free placement (Alt+N). Check departments to place on several at once."
+            editsLocked
+              ? SHOW_MODE_BANNER
+              : placeDeptIds.length > 1
+                ? `Place one cue per selected department at playhead (${placeDeptIds.length} depts). Hold Alt for free placement (Alt+N).`
+                : "Place cue at playhead (N). Hold Alt for free placement (Alt+N). Check departments to place on several at once."
           }
         >
           Cue at playhead
@@ -2381,9 +2505,16 @@ export function App() {
             maxLength={3}
             size={3}
             value={bpmDraft ?? String(project.settings.bpm)}
-            title="Whole BPM only (integer). Clear and type, then Enter or blur to apply."
+            readOnly={editsLocked}
+            disabled={editsLocked}
+            title={
+              editsLocked
+                ? SHOW_MODE_BANNER
+                : "Whole BPM only (integer). Clear and type, then Enter or blur to apply."
+            }
             aria-label="BPM"
             onChange={(e) => {
+              if (editsLocked) return;
               const v = e.target.value;
               if (v !== "" && !/^\d+$/.test(v)) return;
               setBpmDraft(v);
@@ -2392,7 +2523,7 @@ export function App() {
               if (bpmDraft == null) return;
               const trimmed = bpmDraft.trim();
               setBpmDraft(null);
-              if (trimmed === "") return;
+              if (editsLocked || trimmed === "") return;
               const raw = Number(trimmed);
               if (!Number.isFinite(raw)) return;
               setProject((p) => updateSettings(p, { bpm: clampBpm(raw) }));
@@ -2412,8 +2543,10 @@ export function App() {
               min={1}
               max={32}
               value={sigNum}
+              disabled={editsLocked}
               aria-label="Beats per bar"
               onChange={(e) => {
+                if (editsLocked) return;
                 const n = Number.parseInt(e.target.value, 10);
                 if (!Number.isFinite(n) || n <= 0) return;
                 setProject((p) =>
@@ -2429,8 +2562,10 @@ export function App() {
               min={1}
               max={32}
               value={sigDen}
+              disabled={editsLocked}
               aria-label="Beat unit"
               onChange={(e) => {
+                if (editsLocked) return;
                 const d = Number.parseInt(e.target.value, 10);
                 if (!Number.isFinite(d) || d <= 0) return;
                 setProject((p) =>
@@ -2449,8 +2584,14 @@ export function App() {
             min={0}
             step={0.001}
             value={project.settings.downbeatOffsetSec}
-            title="Downbeat offset from file start (seconds)"
+            disabled={editsLocked}
+            title={
+              editsLocked
+                ? SHOW_MODE_BANNER
+                : "Downbeat offset from file start (seconds)"
+            }
             onChange={(e) => {
+              if (editsLocked) return;
               const downbeatOffsetSec = Number(e.target.value);
               if (!Number.isFinite(downbeatOffsetSec)) return;
               setProject((p) =>
@@ -2466,14 +2607,20 @@ export function App() {
           FPS
           <select
             value={project.settings.fps}
-            title="Project frame rate for show timecode"
-            onChange={(e) =>
+            disabled={editsLocked}
+            title={
+              editsLocked
+                ? SHOW_MODE_BANNER
+                : "Project frame rate for show timecode"
+            }
+            onChange={(e) => {
+              if (editsLocked) return;
               setProject((p) =>
                 updateSettings(p, {
                   fps: e.target.value as FrameRateLabel,
                 }),
-              )
-            }
+              );
+            }}
           >
             {FRAME_RATE_LABELS.map((label) => (
               <option key={label} value={label}>
@@ -2489,9 +2636,18 @@ export function App() {
             className="tc-offset-input"
             value={tcOffsetDisplay}
             spellCheck={false}
-            title="Show timecode at file start (HH:MM:SS:FF)"
+            readOnly={editsLocked}
+            disabled={editsLocked}
+            title={
+              editsLocked
+                ? SHOW_MODE_BANNER
+                : "Show timecode at file start (HH:MM:SS:FF)"
+            }
             placeholder="HH:MM:SS:FF"
-            onChange={(e) => setTcOffsetDraft(e.target.value)}
+            onChange={(e) => {
+              if (editsLocked) return;
+              setTcOffsetDraft(e.target.value);
+            }}
             onBlur={commitTcOffset}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -2504,13 +2660,16 @@ export function App() {
           Snap
           <select
             value={project.settings.gridResolution}
-            onChange={(e) =>
+            disabled={editsLocked}
+            title={editsLocked ? SHOW_MODE_BANNER : undefined}
+            onChange={(e) => {
+              if (editsLocked) return;
               setProject((p) =>
                 updateSettings(p, {
                   gridResolution: e.target.value as GridResolution,
                 }),
-              )
-            }
+              );
+            }}
           >
             {GRID_RESOLUTIONS.map((res) => (
               <option key={res} value={res}>
@@ -2523,11 +2682,13 @@ export function App() {
           <input
             type="checkbox"
             checked={project.settings.snapEnabled}
-            onChange={(e) =>
+            disabled={editsLocked}
+            onChange={(e) => {
+              if (editsLocked) return;
               setProject((p) =>
                 updateSettings(p, { snapEnabled: e.target.checked }),
-              )
-            }
+              );
+            }}
           />
           Magnetic snap
         </label>
@@ -2699,9 +2860,12 @@ export function App() {
                 <button
                   type="button"
                   className="icon danger"
-                  title="Delete department"
+                  title={editsLocked ? SHOW_MODE_BANNER : "Delete department"}
+                  disabled={editsLocked}
                   onClick={(ev) => {
                     ev.stopPropagation();
+                    if (!allowShowEdit("deleteDepartment", "delete department"))
+                      return;
                     setProject((p) =>
                       touchProject({
                         ...p,
@@ -2728,17 +2892,22 @@ export function App() {
               type="text"
               placeholder="New department"
               value={newDeptName}
+              disabled={editsLocked}
               onChange={(e) => setNewDeptName(e.target.value)}
             />
             <input
               type="color"
               value={newDeptColor}
+              disabled={editsLocked}
               onChange={(e) => setNewDeptColor(e.target.value)}
               aria-label="Department color"
             />
             <button
               type="button"
+              disabled={editsLocked}
+              title={editsLocked ? SHOW_MODE_BANNER : undefined}
               onClick={() => {
+                if (!allowShowEdit("addDepartment", "add department")) return;
                 if (!newDeptName.trim()) return;
                 setProject((p) => {
                   const next = addDepartment(
@@ -2762,7 +2931,11 @@ export function App() {
                     project.departments.find((d) => d.id === activeDeptId)?.name ??
                     ""
                   }
-                  onChange={(e) =>
+                  disabled={editsLocked}
+                  readOnly={editsLocked}
+                  onChange={(e) => {
+                    if (!allowShowEdit("renameDepartment", "rename department"))
+                      return;
                     setProject((p) =>
                       touchProject({
                         ...p,
@@ -2772,8 +2945,8 @@ export function App() {
                           e.target.value,
                         ),
                       }),
-                    )
-                  }
+                    );
+                  }}
                   aria-label="Rename active department"
                 />
                 <input
@@ -2782,7 +2955,12 @@ export function App() {
                     project.departments.find((d) => d.id === activeDeptId)
                       ?.color ?? "#888"
                   }
-                  onChange={(e) =>
+                  disabled={editsLocked}
+                  onChange={(e) => {
+                    if (
+                      !allowShowEdit("recolorDepartment", "recolor department")
+                    )
+                      return;
                     setProject((p) =>
                       touchProject({
                         ...p,
@@ -2792,8 +2970,8 @@ export function App() {
                           e.target.value,
                         ),
                       }),
-                    )
-                  }
+                    );
+                  }}
                   aria-label="Recolor active department"
                 />
               </>
@@ -2955,7 +3133,10 @@ export function App() {
                 <input
                   type="text"
                   value={selectedCue.label}
-                  onChange={(e) =>
+                  disabled={editsLocked}
+                  readOnly={editsLocked}
+                  onChange={(e) => {
+                    if (!allowShowEdit("updateCue", "edit cue")) return;
                     setProject((p) =>
                       touchProject({
                         ...p,
@@ -2963,8 +3144,8 @@ export function App() {
                           label: e.target.value,
                         }),
                       }),
-                    )
-                  }
+                    );
+                  }}
                 />
               </label>
               <label>
@@ -2972,7 +3153,10 @@ export function App() {
                 <input
                   type="text"
                   value={selectedCue.cueNoDept}
-                  onChange={(e) =>
+                  disabled={editsLocked}
+                  readOnly={editsLocked}
+                  onChange={(e) => {
+                    if (!allowShowEdit("updateCue", "edit cue")) return;
                     setProject((p) =>
                       touchProject({
                         ...p,
@@ -2980,8 +3164,8 @@ export function App() {
                           cueNoDept: e.target.value,
                         }),
                       }),
-                    )
-                  }
+                    );
+                  }}
                 />
               </label>
               <label>
@@ -2989,7 +3173,10 @@ export function App() {
                 <input
                   type="text"
                   value={selectedCue.note ?? ""}
-                  onChange={(e) =>
+                  disabled={editsLocked}
+                  readOnly={editsLocked}
+                  onChange={(e) => {
+                    if (!allowShowEdit("updateCue", "edit cue")) return;
                     setProject((p) =>
                       touchProject({
                         ...p,
@@ -2997,8 +3184,8 @@ export function App() {
                           note: e.target.value,
                         }),
                       }),
-                    )
-                  }
+                    );
+                  }}
                 />
               </label>
               <label>
@@ -3011,7 +3198,12 @@ export function App() {
                     formatTime(selectedCue.tAbs, timeMode, project.settings)
                   }
                   placeholder={timeInputPlaceholder(timeMode)}
-                  onChange={(e) => setInspectorTimeDraft(e.target.value)}
+                  disabled={editsLocked}
+                  readOnly={editsLocked}
+                  onChange={(e) => {
+                    if (editsLocked) return;
+                    setInspectorTimeDraft(e.target.value);
+                  }}
                   onBlur={commitInspectorTime}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -3030,7 +3222,10 @@ export function App() {
               </div>
               <button
                 type="button"
-                onClick={() =>
+                disabled={editsLocked}
+                title={editsLocked ? SHOW_MODE_BANNER : undefined}
+                onClick={() => {
+                  if (!allowShowEdit("moveCue", "move cue")) return;
                   setProject((p) =>
                     touchProject({
                       ...p,
@@ -3040,8 +3235,8 @@ export function App() {
                         snapToGrid(selectedCue.tAbs, p.settings),
                       ),
                     }),
-                  )
-                }
+                  );
+                }}
               >
                 Snap to grid
               </button>
@@ -3058,6 +3253,7 @@ export function App() {
                   <button
                     type="button"
                     onClick={() => {
+                      if (!allowShowEdit("copyCue", "copy cue")) return;
                       const sourceDeptIds = new Set(
                         selectedCueIds
                           .map(
@@ -3080,8 +3276,12 @@ export function App() {
                       );
                       setCopyPanelOpen(true);
                     }}
-                    disabled={project.departments.length < 2}
-                    title="Duplicate selected cue(s) onto other departments at the same time"
+                    disabled={editsLocked || project.departments.length < 2}
+                    title={
+                      editsLocked
+                        ? SHOW_MODE_BANNER
+                        : "Duplicate selected cue(s) onto other departments at the same time"
+                    }
                   >
                     Copy to…
                   </button>
@@ -3107,7 +3307,7 @@ export function App() {
                               <input
                                 type="checkbox"
                                 checked={copyTargetDeptIds.includes(d.id)}
-                                disabled={allFromThisDept}
+                                disabled={allFromThisDept || editsLocked}
                                 onChange={(e) => {
                                   const on = e.target.checked;
                                   setCopyTargetDeptIds((prev) =>
@@ -3134,10 +3334,12 @@ export function App() {
                         type="button"
                         className="primary"
                         disabled={
+                          editsLocked ||
                           copyTargetDeptIds.length === 0 ||
                           selectedCueIds.length === 0
                         }
                         onClick={() => {
+                          if (!allowShowEdit("copyCue", "copy cue")) return;
                           const sourceCount = selectedCueIds.length;
                           const { cues: nextCues, createdIds } =
                             copyCuesToDepartments(project.cues, {
@@ -3180,7 +3382,10 @@ export function App() {
               <button
                 type="button"
                 className="danger"
+                disabled={editsLocked}
+                title={editsLocked ? SHOW_MODE_BANNER : undefined}
                 onClick={() => {
+                  if (!allowShowEdit("deleteCue", "delete cue")) return;
                   setProject((p) => {
                     let cues = p.cues;
                     for (const id of selectedCueIds) {

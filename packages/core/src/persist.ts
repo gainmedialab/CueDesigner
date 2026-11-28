@@ -114,9 +114,11 @@ function assertProjectShape(raw: unknown): asserts raw is Project {
 export function serializeProject(
   project: Project,
   mediaDataUrl?: string,
+  preferShowMode?: boolean,
 ): string {
   const file: ProjectFile = { project };
   if (mediaDataUrl) file.mediaDataUrl = mediaDataUrl;
+  if (preferShowMode !== undefined) file.preferShowMode = preferShowMode;
   return JSON.stringify(file, null, 2);
 }
 
@@ -143,6 +145,10 @@ export function deserializeProject(json: string): ProjectFile {
     project: normalized,
     mediaDataUrl:
       typeof root.mediaDataUrl === "string" ? root.mediaDataUrl : undefined,
+    preferShowMode:
+      typeof root.preferShowMode === "boolean"
+        ? root.preferShowMode
+        : undefined,
   };
 }
 
@@ -150,8 +156,9 @@ export function deserializeProject(json: string): ProjectFile {
 export function projectDownloadBlob(
   project: Project,
   mediaDataUrl?: string,
+  preferShowMode?: boolean,
 ): Blob {
-  return new Blob([serializeProject(project, mediaDataUrl)], {
+  return new Blob([serializeProject(project, mediaDataUrl, preferShowMode)], {
     type: "application/json",
   });
 }
