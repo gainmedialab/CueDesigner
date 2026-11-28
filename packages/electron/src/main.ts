@@ -375,7 +375,7 @@ function webDistIndex(): string {
 
 function allowPermission(permission: string): boolean {
   // LTC chase: getUserMedia. LTC generate: Web Audio output (setSinkId).
-  // MTC chase: Web MIDI (incl. sysex full-frame). MTC generate: stubbed.
+  // MTC chase: Web MIDI (incl. sysex full-frame). MTC generate: Web MIDI out.
   switch (permission) {
     case "media":
     case "audioCapture":

@@ -108,11 +108,14 @@ import {
 } from "./timecodeSync";
 import {
   GENERATE_FLAVOURS,
+  GenerateController,
   LtcGenerator,
+  MtcGenerator,
   emptyGenerateStatus,
   type GenerateFlavour,
   type GenerateStatusSnapshot,
   type LtcOutputDeviceInfo,
+  type MidiOutputInfo,
 } from "./timecodeGenerate";
 import { buildZipBlob, downloadBlob, readZipEntries } from "./zipDownload";
 
@@ -197,6 +200,10 @@ export function App() {
   const [ltcOutDeviceId, setLtcOutDeviceId] = useState<string>("");
   const [ltcOutChannelIndex, setLtcOutChannelIndex] = useState(0);
   const [ltcOutDevicesLoading, setLtcOutDevicesLoading] = useState(false);
+  /** MTC MIDI output — session only (ports are ephemeral). */
+  const [midiOutputs, setMidiOutputs] = useState<MidiOutputInfo[]>([]);
+  const [midiOutputId, setMidiOutputId] = useState<string>("");
+  const [midiOutputsLoading, setMidiOutputsLoading] = useState(false);
   /** Session rehearsal loop — not persisted in the project file. */
   const [loopEnabled, setLoopEnabled] = useState(false);
   const [loopMode, setLoopMode] = useState<RehearsalLoopMode>("ab");
@@ -240,7 +247,7 @@ export function App() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
-  const generateRef = useRef<LtcGenerator | null>(null);
+  const generateRef = useRef<GenerateController | null>(null);
   const projectClockRef = useRef({
     fps: project.settings.fps,
     showTcOffsetSec: project.settings.showTcOffsetSec,
@@ -257,6 +264,10 @@ export function App() {
   ltcOutRouteRef.current = {
     deviceId: ltcOutDeviceId,
     channelIndex: ltcOutChannelIndex,
+  };
+  const midiOutRouteRef = useRef({ outputId: "" });
+  midiOutRouteRef.current = {
+    outputId: midiOutputId,
   };
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
@@ -446,12 +457,20 @@ export function App() {
     syncRef.current = sync;
     sync.onStatus((s) => setSyncStatus(s));
 
-    const generate = new LtcGenerator({
-      getProjectFps: () => projectClockRef.current.fps,
-      getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
-      getMediaTime: () => audioRef.current?.currentTime ?? 0,
-      getOutputDeviceId: () => ltcOutRouteRef.current.deviceId || null,
-      getOutputChannelIndex: () => ltcOutRouteRef.current.channelIndex,
+    const generate = new GenerateController({
+      ltc: {
+        getProjectFps: () => projectClockRef.current.fps,
+        getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
+        getMediaTime: () => audioRef.current?.currentTime ?? 0,
+        getOutputDeviceId: () => ltcOutRouteRef.current.deviceId || null,
+        getOutputChannelIndex: () => ltcOutRouteRef.current.channelIndex,
+      },
+      mtc: {
+        getProjectFps: () => projectClockRef.current.fps,
+        getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
+        getMediaTime: () => audioRef.current?.currentTime ?? 0,
+        getMidiOutputId: () => midiOutRouteRef.current.outputId || null,
+      },
     });
     generateRef.current = generate;
     generate.onStatus((s) => setGenerateStatus(s));
@@ -544,10 +563,32 @@ export function App() {
     }
   }, []);
 
-  // Enumerate LTC outputs once so Generate can arm without a blank device list.
+  const refreshMidiOutputs = useCallback(async () => {
+    setMidiOutputsLoading(true);
+    try {
+      const outputs = await MtcGenerator.listMidiOutputs();
+      setMidiOutputs(outputs);
+      const prevId = midiOutRouteRef.current.outputId;
+      const nextId =
+        prevId && outputs.some((o) => o.id === prevId)
+          ? prevId
+          : MtcGenerator.pickDefaultOutputId(outputs);
+      midiOutRouteRef.current = { outputId: nextId };
+      setMidiOutputId(nextId);
+    } catch (err) {
+      setStatus(
+        `MIDI output list failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setMidiOutputsLoading(false);
+    }
+  }, []);
+
+  // Enumerate LTC / MIDI outputs once so Generate can arm without a blank list.
   useEffect(() => {
     void refreshLtcOutDevices();
-  }, [refreshLtcOutDevices]);
+    void refreshMidiOutputs();
+  }, [refreshLtcOutDevices, refreshMidiOutputs]);
 
   // Switch LTC / MTC / Internal (permission prompts happen here).
   // External sync is chase-only: pause file transport immediately on leave Internal.
@@ -1924,14 +1965,11 @@ export function App() {
             ? "Locking"
             : "Unlocked";
 
-  const generateChipLabel =
-    generateFlavour === "mtc"
-      ? "MTC stub"
-      : generateStatus.emitting
-        ? "Generating"
-        : generateArmed
-          ? "Armed"
-          : "Disarmed";
+  const generateChipLabel = generateStatus.emitting
+    ? "Generating"
+    : generateArmed
+      ? "Armed"
+      : "Disarmed";
 
   runFileActionRef.current = (payload: CueDesktopFilePayload) => {
     // Native dialog already chose a file (Electron Open / Open Shared).
@@ -2385,7 +2423,7 @@ export function App() {
             }`}
             aria-expanded={shellDrawer === "generate"}
             aria-controls="shell-drawer-generate"
-            title="Outgoing LTC generate (independent of Sync chase)"
+            title="Outgoing LTC / MTC generate (independent of Sync chase)"
             onClick={() => toggleShellDrawer("generate")}
           >
             <span
@@ -2695,24 +2733,29 @@ export function App() {
             Generate
             <select
               value={generateFlavour}
-              title="Outgoing TC flavour. LTC out ships now; MTC out is stubbed."
+              title="Outgoing TC flavour — LTC (audio) or MTC (MIDI). Independent of Sync chase."
               aria-label="Outgoing timecode flavour"
               onChange={(e) => {
                 const next = e.target.value as GenerateFlavour;
                 setGenerateFlavour(next);
-                if (next === "mtc" && generateArmed) {
-                  setGenerateArmed(false);
-                  void generateRef.current?.setArmed(false);
-                }
+                setGenerateArmed(false);
+                void (async () => {
+                  try {
+                    await generateRef.current?.setFlavour(next);
+                    setGenerateStatus(emptyGenerateStatus(next));
+                  } catch (err) {
+                    setStatus(
+                      `Generate flavour switch failed: ${
+                        err instanceof Error ? err.message : String(err)
+                      }`,
+                    );
+                  }
+                })();
               }}
             >
               {GENERATE_FLAVOURS.map((flav) => (
-                <option
-                  key={flav}
-                  value={flav}
-                  disabled={flav === "mtc"}
-                >
-                  {flav === "ltc" ? "LTC out" : "MTC out (soon)"}
+                <option key={flav} value={flav}>
+                  {flav === "ltc" ? "LTC out" : "MTC out"}
                 </option>
               ))}
             </select>
@@ -2807,9 +2850,7 @@ export function App() {
                   type="checkbox"
                   checked={generateArmed}
                   disabled={
-                    generateFlavour !== "ltc" ||
-                    ltcOutDevices.length === 0 ||
-                    !ltcOutDeviceId
+                    ltcOutDevices.length === 0 || !ltcOutDeviceId
                   }
                   onChange={(e) => {
                     const on = e.target.checked;
@@ -2836,7 +2877,83 @@ export function App() {
                 Arm
               </label>
             </>
-          ) : null}
+          ) : (
+            <>
+              <label className="sync-source-field sync-ltc-device-field">
+                MIDI
+                <select
+                  value={midiOutputId}
+                  disabled={midiOutputsLoading || midiOutputs.length === 0}
+                  title="MIDI output for MTC — use IAC / virtual cable / desk MIDI in"
+                  aria-label="MTC MIDI output port"
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    midiOutRouteRef.current = { outputId: id };
+                    setMidiOutputId(id);
+                    void generateRef.current?.applyRoute();
+                  }}
+                >
+                  {midiOutputs.length === 0 ? (
+                    <option value="">
+                      {midiOutputsLoading ? "Scanning…" : "No MIDI outputs"}
+                    </option>
+                  ) : (
+                    midiOutputs.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="sync-refresh-btn"
+                disabled={midiOutputsLoading}
+                title="Re-enumerate MIDI outputs"
+                onClick={() => {
+                  void (async () => {
+                    await refreshMidiOutputs();
+                    void generateRef.current?.applyRoute();
+                  })();
+                }}
+              >
+                {midiOutputsLoading ? "…" : "↻"}
+              </button>
+              <label
+                className="generate-arm"
+                title="Arm MTC out. Emits only while Internal transport plays. Does not affect Sync chase."
+              >
+                <input
+                  type="checkbox"
+                  checked={generateArmed}
+                  disabled={midiOutputs.length === 0 || !midiOutputId}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setGenerateArmed(on);
+                    void (async () => {
+                      try {
+                        if (on) await refreshMidiOutputs();
+                        await generateRef.current?.setArmed(on);
+                        if (on && playing) {
+                          generateRef.current?.primeFromGesture();
+                          generateRef.current?.setPlaying(true);
+                        }
+                      } catch (err) {
+                        setGenerateArmed(false);
+                        setStatus(
+                          `MTC generate arm failed: ${
+                            err instanceof Error ? err.message : String(err)
+                          }`,
+                        );
+                      }
+                    })();
+                  }}
+                />
+                Arm
+              </label>
+            </>
+          )}
           <span
             className={`sync-status generate-status${
               generateStatus.emitting ? " generate-emitting" : ""
@@ -2845,13 +2962,11 @@ export function App() {
           >
             <span className="sync-lock-dot" aria-hidden />
             <span className="sync-lock-label">
-              {generateFlavour === "mtc"
-                ? "MTC stub"
-                : generateStatus.emitting
-                  ? "Generating"
-                  : generateArmed
-                    ? "Armed"
-                    : "Disarmed"}
+              {generateStatus.emitting
+                ? "Generating"
+                : generateArmed
+                  ? "Armed"
+                  : "Disarmed"}
             </span>
             {generateStatus.tcDisplay ? (
               <span className="sync-tc">{generateStatus.tcDisplay}</span>
@@ -2864,9 +2979,21 @@ export function App() {
               </span>
             )}
           </span>
-          <span className="generate-safety" title="Never route LTC into FOH or cue monitors">
-            LTC ≠ FOH
-          </span>
+          {generateFlavour === "ltc" ? (
+            <span
+              className="generate-safety"
+              title="Never route LTC into FOH or cue monitors"
+            >
+              LTC ≠ FOH
+            </span>
+          ) : (
+            <span
+              className="generate-safety"
+              title="MTC goes to the selected MIDI out only — pick IAC / desk MIDI in, not a random controller"
+            >
+              MTC → MIDI
+            </span>
+          )}
         </div>
       ) : null}
 

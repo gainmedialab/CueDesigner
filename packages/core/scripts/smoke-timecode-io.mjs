@@ -77,7 +77,7 @@ assert(got, "MTC did not assemble");
 assert(got.hours === 1 && got.frames === 4, "MTC fields");
 assert(got.fpsLabel === "25", "MTC rate");
 
-// MTC encode helper (stub for future MIDI out) round-trips via assembler
+// MTC encode helper (MIDI out generate) round-trips via assembler
 assert(frameRateLabelToMtcRateBits("25") === 1, "mtc rate bits");
 const qf = encodeMtcQuarterFrameData({
   hours: 1,
