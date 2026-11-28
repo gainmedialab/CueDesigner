@@ -85,6 +85,10 @@ const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
 const TRACK_LABEL_W = 100;
 const ZOOM_STEP = 1.25;
+/** Keep playhead this fraction into the visible lane while following. */
+const FOLLOW_VIEW_FRAC = 0.35;
+/** Throttle waveform scroll-left React sync while following (~8 Hz). */
+const FOLLOW_WAVE_SYNC_MS = 120;
 
 /** Snap unless Alt/Option is held, or project snap is disabled. */
 function applySnap(
@@ -156,6 +160,8 @@ export function App() {
   const projectInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
+  /** Mirrors timelineZoom for RAF follow / programmatic scroll (updated each render). */
+  const zoomRef = useRef(1);
   const rafRef = useRef<number | null>(null);
   const dragCueIdRef = useRef<string | null>(null);
   const metronomeRef = useRef<Metronome | null>(null);
@@ -167,10 +173,19 @@ export function App() {
   const suppressScrollFollowPauseRef = useRef(false);
   const followPlayheadRef = useRef(followPlayhead);
   followPlayheadRef.current = followPlayhead;
+  /** Latest media/chase time — RAF follow + zoom-around-playhead read this. */
+  const currentTimeRef = useRef(0);
+  currentTimeRef.current = currentTime;
+  const durationRef = useRef(0);
+  const lastWaveScrollSyncMsRef = useRef(0);
   /** Current session media bytes (for save embed + IndexedDB). */
   const mediaBlobRef = useRef<Blob | null>(null);
   const mediaMetaRef = useRef<{ name: string; mimeType: string } | null>(null);
   const [scrollPortW, setScrollPortW] = useState(0);
+
+  const followActive = followPlayhead && !followSuspended;
+  const followActiveRef = useRef(followActive);
+  followActiveRef.current = followActive;
 
   const setScrollLeftProgrammatic = useCallback((left: number) => {
     const el = timelineScrollRef.current;
@@ -178,12 +193,43 @@ export function App() {
     suppressScrollFollowPauseRef.current = true;
     el.scrollLeft = left;
     setTimelineScrollLeft(el.scrollLeft);
-    // Hold suppress across deferred scroll events (some engines fire async).
+    // While follow owns the scrollport, keep suppress latched so deferred
+    // scroll events cannot suspend follow. Otherwise clear after a double-rAF
+    // (some engines fire scroll async after assignment).
+    if (followActiveRef.current && zoomRef.current > 1) return;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        suppressScrollFollowPauseRef.current = false;
+        if (!followActiveRef.current) {
+          suppressScrollFollowPauseRef.current = false;
+        }
       });
     });
+  }, []);
+
+  /** Direct scrollLeft follow — no React state per frame (avoids waveform thrash). */
+  const applyFollowScroll = useCallback((t: number, dur: number) => {
+    if (!followActiveRef.current) return;
+    const zoomNow = zoomRef.current;
+    if (!(zoomNow > 1) || !(dur > 0)) return;
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+    const playheadLaneX = (timeToLanePercent(t, dur) / 100) * laneW;
+    const viewLaneW = Math.max(1, el.clientWidth - TRACK_LABEL_W);
+    const targetViewX = viewLaneW * FOLLOW_VIEW_FRAC;
+    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+    const next = Math.max(
+      0,
+      Math.min(maxScroll, playheadLaneX - targetViewX),
+    );
+    if (Math.abs(el.scrollLeft - next) < 0.5) return;
+    suppressScrollFollowPauseRef.current = true;
+    el.scrollLeft = next;
+    const now = performance.now();
+    if (now - lastWaveScrollSyncMsRef.current > FOLLOW_WAVE_SYNC_MS) {
+      lastWaveScrollSyncMsRef.current = now;
+      setTimelineScrollLeft(el.scrollLeft);
+    }
   }, []);
 
   // Keep active department valid
@@ -376,6 +422,8 @@ export function App() {
   // RAF clock: Internal follows HTMLMediaElement while playing; LTC/MTC is
   // chase-only (file stays paused) — playhead follows TC when locked/freewheel.
   // Soft-seek paused media on drift so returning to Internal resumes at chase pos.
+  // Follow auto-scroll uses direct scrollLeft here (not a currentTime layout
+  // effect) so we do not re-render the waveform every frame.
   useEffect(() => {
     const external = syncSource === "ltc" || syncSource === "mtc";
     const tick = () => {
@@ -383,7 +431,9 @@ export function App() {
       const chase = external ? sync?.sampleChase() : null;
       if (chase) {
         const t = chase.tAbs;
+        currentTimeRef.current = t;
         setCurrentTime(t);
+        applyFollowScroll(t, durationRef.current || 0);
         const audio = audioRef.current;
         if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
           const clamped = Math.min(Math.max(0, t), audio.duration);
@@ -396,20 +446,28 @@ export function App() {
       }
       const audio = audioRef.current;
       if (audio && playing && !external) {
-        setCurrentTime(audio.currentTime);
+        const t = audio.currentTime;
+        currentTimeRef.current = t;
+        setCurrentTime(t);
+        applyFollowScroll(t, durationRef.current || audio.duration || 0);
         rafRef.current = requestAnimationFrame(tick);
       } else if (external) {
         // Waiting for lock — keep RAF alive without advancing from file clock.
+        // Release suppress so a dropout cannot leave the scrollport latched.
+        suppressScrollFollowPauseRef.current = false;
         rafRef.current = requestAnimationFrame(tick);
       }
     };
     if ((!external && playing) || external) {
       rafRef.current = requestAnimationFrame(tick);
+    } else {
+      // Transport stopped — release follow suppress so manual scroll works.
+      suppressScrollFollowPauseRef.current = false;
     }
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
-  }, [playing, syncSource]);
+  }, [playing, syncSource, applyFollowScroll]);
 
   // Measure timeline scrollport for denser ruler marks + track scroll for waveform.
   // Manual scroll suspends follow (checkbox stays on); programmatic scrolls are ignored.
@@ -440,7 +498,9 @@ export function App() {
   }, []);
 
   const duration = project.media?.durationSec ?? 0;
+  durationRef.current = duration;
   const zoom = clampTimelineZoom(project.settings.timelineZoom);
+  zoomRef.current = zoom;
 
   // Viewport waveform: peaks keyed to the same tAbs % as cues/grid/playhead.
   // Canvas covers only the visible lane slice so zoom keeps ~1 peak per device pixel.
@@ -479,7 +539,8 @@ export function App() {
     project.departments.length,
   ]);
 
-  // Keep zoom-to-cursor / zoom-around-playhead scroll anchor after layout
+  // Keep zoom-to-cursor / zoom-around-playhead scroll anchor after layout.
+  // Re-read scrollWidth here (post-commit) so the new zoom width is used.
   useLayoutEffect(() => {
     const anchor = pendingZoomAnchorRef.current;
     const el = timelineScrollRef.current;
@@ -492,9 +553,13 @@ export function App() {
     );
   }, [zoom, duration, setScrollLeftProgrammatic]);
 
-  // Follow auto-scroll during play intentionally omitted in this baseline
-  // restore (pre-shortcut). The currentTime→useLayoutEffect follow path from
-  // 35c6e11 caused per-frame React/waveform thrash. Checkbox still latches.
+  // Snap once when Follow becomes active (e.g. re-check / F / Play clears
+  // suspension). Continuous follow runs inside the RAF clock. Do not depend
+  // on zoom — the zoom-anchor layout effect owns that scroll restore.
+  useLayoutEffect(() => {
+    if (!followActive || zoomRef.current <= 1 || !(duration > 0)) return;
+    applyFollowScroll(currentTimeRef.current, duration);
+  }, [followActive, duration, applyFollowScroll]);
 
   const applyTimelineZoom = useCallback(
     (nextZoom: number, anchor: { t: number; cursorX: number } | null) => {
@@ -509,20 +574,28 @@ export function App() {
   const zoomAroundPlayhead = useCallback(
     (nextZoom: number) => {
       const el = timelineScrollRef.current;
-      let cursorX = (el?.clientWidth ?? 0) / 2;
-      if (el && duration > 0) {
-        const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
-        const playheadViewX =
-          TRACK_LABEL_W +
-          (timeToLanePercent(currentTime, duration) / 100) * laneW -
-          el.scrollLeft;
-        if (playheadViewX >= 0 && playheadViewX <= el.clientWidth) {
-          cursorX = playheadViewX;
+      const t = currentTimeRef.current;
+      const dur = durationRef.current || duration;
+      // Default: park playhead at the follow fraction of the visible lane so
+      // off-screen zoom still anchors on the playhead (not viewport center).
+      let cursorX = TRACK_LABEL_W;
+      if (el) {
+        const viewLaneW = Math.max(1, el.clientWidth - TRACK_LABEL_W);
+        cursorX = TRACK_LABEL_W + viewLaneW * FOLLOW_VIEW_FRAC;
+        if (dur > 0) {
+          const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+          const playheadViewX =
+            TRACK_LABEL_W +
+            (timeToLanePercent(t, dur) / 100) * laneW -
+            el.scrollLeft;
+          if (playheadViewX >= 0 && playheadViewX <= el.clientWidth) {
+            cursorX = playheadViewX;
+          }
         }
       }
-      applyTimelineZoom(nextZoom, { t: currentTime, cursorX });
+      applyTimelineZoom(nextZoom, { t, cursorX });
     },
-    [applyTimelineZoom, currentTime, duration],
+    [applyTimelineZoom, duration],
   );
 
   // Non-passive wheel so Ctrl/⌘+wheel can zoom without browser page-zoom.
@@ -573,6 +646,7 @@ export function App() {
     if (playing) {
       audio.pause();
       setPlaying(false);
+      suppressScrollFollowPauseRef.current = false;
     } else {
       // Clear scroll suspension; checkbox preference stays latched.
       setFollowSuspended(false);
@@ -593,8 +667,6 @@ export function App() {
   togglePlayRef.current = togglePlay;
   const zoomAroundPlayheadRef = useRef(zoomAroundPlayhead);
   zoomAroundPlayheadRef.current = zoomAroundPlayhead;
-  const zoomRef = useRef(zoom);
-  zoomRef.current = zoom;
   const seekRef = useRef(seek);
   seekRef.current = seek;
   const exportOpenRef = useRef(exportOpen);
@@ -1617,12 +1689,12 @@ export function App() {
           className={`grid-field follow-field${followSuspended && followPlayhead ? " suspended" : ""}`}
           title={
             zoom <= 1
-              ? "Follow playhead (keep preference; auto-scroll deferred)"
+              ? "Follow playhead (active when zoomed in)"
               : !followPlayhead
                 ? "Follow off — check to enable"
                 : followSuspended
-                  ? "Follow preference paused by scroll — Play clears suspension"
-                  : "Follow preference on (auto-scroll during play deferred)"
+                  ? "Follow paused by scroll — Play or re-check clears suspension"
+                  : "Following playhead while playing / chasing"
           }
         >
           <input
