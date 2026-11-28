@@ -86,13 +86,30 @@ export function resolveExportCues(
   });
 }
 
-/** Cue display name for desk exports. */
+/**
+ * Cue display name for desk exports — always leads with the per-department
+ * cue number so MagicQ / MA / SFX lists match the operator's stack.
+ */
 export function cueExportName(cue: Cue, department?: Department): string {
-  const label = cue.label?.trim() || `Cue ${cue.cueNoDept}`;
-  if (!department) return label;
-  // Prefer label; if generic "Cue", include dept + number.
-  if (cue.label?.trim() && cue.label.trim() !== "Cue") return label;
-  return `${department.name} ${cue.cueNoDept}`;
+  const num = cue.cueNoDept?.trim() || "?";
+  const label = cue.label?.trim();
+  if (label && label !== "Cue") {
+    return `${num} ${label}`;
+  }
+  if (department) return `${department.name} ${num}`;
+  return `Cue ${num}`;
+}
+
+/**
+ * Desk/sequence cue number from the per-department value when numeric
+ * (supports decimals like `5.1`). Falls back to 1-based index otherwise.
+ */
+export function deskCueNumber(cue: Cue, fallbackIndex: number): string {
+  const raw = cue.cueNoDept?.trim() ?? "";
+  if (raw !== "" && Number.isFinite(Number.parseFloat(raw))) {
+    return raw;
+  }
+  return String(Math.max(1, fallbackIndex));
 }
 
 /** Format show-timeline seconds as colon-only HH:MM:SS:FF (MA macros). */

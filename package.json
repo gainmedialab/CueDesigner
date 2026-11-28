@@ -14,6 +14,7 @@
     "test:share-package": "npm run build -w @cuedesigner/core && node packages/core/scripts/test-share-package.mjs",
     "test:share-zip": "npm run build -w @cuedesigner/core && node packages/web/scripts/test-share-zip-roundtrip.mjs",
     "test:multi-dept-cues": "npm run build -w @cuedesigner/core && node packages/core/scripts/test-multi-dept-cues.mjs",
+    "test:cue-numbering": "npm run build -w @cuedesigner/core && node packages/core/scripts/test-cue-numbering.mjs",
     "test:rehearsal": "npm run build -w @cuedesigner/core && node packages/core/scripts/test-rehearsal.mjs",
     "test:show-mode": "npm run build -w @cuedesigner/core && node packages/core/scripts/test-show-mode.mjs",
     "dev:web": "npm run dev -w @cuedesigner/web",

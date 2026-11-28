@@ -1,5 +1,24 @@
 import type { Cue, Department } from "./types.js";
 
+/** Trim + collapse whitespace for a per-department cue number. */
+export function normalizeDeptCueNumber(raw: string): string {
+  return raw.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * True when the string is a usable dept cue number (non-empty after normalize).
+ * Decimals and whole numbers are both valid (`5`, `5.1`).
+ */
+export function isValidDeptCueNumber(raw: string): boolean {
+  return normalizeDeptCueNumber(raw).length > 0;
+}
+
+/** Parse a dept cue number for sequencing / desk export; NaN if not numeric. */
+export function parseDeptCueNumber(raw: string): number {
+  const n = Number.parseFloat(normalizeDeptCueNumber(raw));
+  return Number.isFinite(n) ? n : Number.NaN;
+}
+
 export function createCue(input: {
   id: string;
   tAbs: number;
@@ -13,7 +32,7 @@ export function createCue(input: {
     id: input.id,
     tAbs: Math.max(0, input.tAbs),
     departmentId: input.departmentId,
-    cueNoDept: input.cueNoDept,
+    cueNoDept: normalizeDeptCueNumber(input.cueNoDept) || "1",
     label: input.label?.trim() || "Cue",
     note: input.note,
     fadeSec: input.fadeSec,
@@ -29,13 +48,18 @@ export function recomputeOrdinals(cues: Cue[]): Cue[] {
   return sorted.map((c, i) => ({ ...c, ordinalGlobal: i + 1 }));
 }
 
+/**
+ * Next whole-number cue for a department: floor(max numeric) + 1.
+ * Non-numeric / empty dept numbers are ignored when finding max.
+ * After `5.1` the next auto number is `6`.
+ */
 export function nextDeptCueNumber(
   cues: Cue[],
   departmentId: string,
 ): string {
   const nums = cues
     .filter((c) => c.departmentId === departmentId)
-    .map((c) => Number.parseFloat(c.cueNoDept))
+    .map((c) => parseDeptCueNumber(c.cueNoDept))
     .filter((n) => Number.isFinite(n));
   const max = nums.length ? Math.max(...nums) : 0;
   return String(Math.floor(max) + 1);
@@ -144,7 +168,16 @@ export function updateCue(
   id: string,
   patch: Partial<Omit<Cue, "id" | "ordinalGlobal">>,
 ): Cue[] {
-  const next = cues.map((c) => (c.id === id ? { ...c, ...patch } : c));
+  const next = cues.map((c) => {
+    if (c.id !== id) return c;
+    const merged = { ...c, ...patch };
+    if (patch.cueNoDept != null) {
+      const normalized = normalizeDeptCueNumber(patch.cueNoDept);
+      merged.cueNoDept = normalized || c.cueNoDept;
+    }
+    return merged;
+  });
+  // Ordinals always follow absolute time order (show-order index for SM).
   return recomputeOrdinals(next);
 }
 

@@ -2,6 +2,7 @@ import type { FrameRateLabel, Project } from "../types.js";
 import { frameRateInfo } from "../time.js";
 import {
   cueExportName,
+  deskCueNumber,
   resolveExportCues,
   sanitizeFilename,
 } from "./helpers.js";
@@ -139,7 +140,9 @@ function buildGrandMA3Macro(project: Project, options: ExportOptions): string {
       `Label DataPool "${pool}" Sequence ${g.seqIndex} "${g.name.replace(/"/g, "'")}"`,
     );
     g.cues.forEach((r, i) => {
-      const cueNo = i + 1;
+      // Prefer per-department cue numbers (incl. decimals) so the desk stack
+      // matches Lighting 5.1 / Pyro 12 rather than a regenerated 1..N index.
+      const cueNo = deskCueNumber(r.cue, i + 1);
       const fade = r.cue.fadeSec != null && Number.isFinite(r.cue.fadeSec)
         ? Math.max(0, r.cue.fadeSec)
         : 0;
@@ -188,7 +191,7 @@ function buildGrandMA3Macro(project: Project, options: ExportOptions): string {
 
     g.cues.forEach((r, i) => {
       const event = i + 1;
-      const cueNo = i + 1;
+      const cueNo = deskCueNumber(r.cue, i + 1);
       // Event time is show-timeline seconds (file abs + offset already in wall clock
       // relative to TC zero when OFFSETTCSLOT is set — use file-relative + offset).
       const eventTime = r.cue.tAbs + offsetSec;
