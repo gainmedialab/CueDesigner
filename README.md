@@ -85,7 +85,7 @@ Use the **BPM bar** under transport:
 | **Downbeat** | Offset of bar 1 beat 1 from file start (seconds); shared by snap, grid, musical time, and click |
 | **Snap** | Grid resolution: Bar, Beat, 1/4, 1/8, 1/16, 1/32 |
 | **Magnetic snap** | When on, place/drag snaps to the grid |
-| **Click** | Metronome on the beat grid while playing (downbeat accent); **Vol** sets level |
+| **Click** | Web Audio metronome on the beat grid while playing (downbeat accent); **Vol** sets level. Enabling Click auditions a tick and unlocks the click context (does not route media through MediaElementSource) |
 | **FPS** | Project frame rate for show TC: 23.976, 24, 25, 29.97 DF, 29.97 NDF, 30 |
 | **TC offset** | Show timecode at file start (`HH:MM:SS:FF` / `;FF` for DF) |
 | **Zoom** | Timeline horizontal zoom (`−` / slider / `+`); denser ruler + waveform peaks when zoomed |

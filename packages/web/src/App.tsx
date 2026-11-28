@@ -60,6 +60,7 @@ import {
 import {
   Metronome,
   drawWaveform,
+  estimateDownbeatOffsetSec,
   loadAudioFile,
   loadWaveformData,
   type WaveformData,
@@ -386,6 +387,20 @@ export function App() {
     project.settings.metronomeVolume,
   ]);
 
+  // Auto-Downbeat from first strong onset when still at 0 (pickup files).
+  useEffect(() => {
+    if (!waveform) return;
+    if (project.settings.downbeatOffsetSec > 0) return;
+    const est = estimateDownbeatOffsetSec(waveform, {
+      bpm: project.settings.bpm,
+    });
+    if (!(est > 0)) return;
+    setProject((p) => {
+      if (p.settings.downbeatOffsetSec > 0) return p;
+      return updateSettings(p, { downbeatOffsetSec: est });
+    });
+  }, [waveform, project.settings.bpm, project.settings.downbeatOffsetSec]);
+
   useEffect(() => {
     metronomeRef.current?.setPlaying(playing);
   }, [playing]);
@@ -671,8 +686,9 @@ export function App() {
       try {
         // Start media immediately (native element). Click AudioContext resume
         // is non-blocking — never await click priming before audio.play().
-        const playP = audio.play();
+        // primeFromGesture runs inside resume() under this user gesture stack.
         void metronomeRef.current?.resume();
+        const playP = audio.play();
         await playP;
         setPlaying(true);
       } catch (err) {
@@ -1639,11 +1655,14 @@ export function App() {
           <input
             type="checkbox"
             checked={project.settings.metronomeEnabled}
-            onChange={(e) =>
+            onChange={(e) => {
+              const on = e.target.checked;
+              // Unlock Web Audio under this gesture + audition so Click is audible.
+              if (on) metronomeRef.current?.auditionSync();
               setProject((p) =>
-                updateSettings(p, { metronomeEnabled: e.target.checked }),
-              )
-            }
+                updateSettings(p, { metronomeEnabled: on }),
+              );
+            }}
             title="Click on the BPM beat grid while playing (accent on downbeat)"
           />
           Click
