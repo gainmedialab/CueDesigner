@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session, shell } from "electron";
+import { app, BrowserWindow, Menu, session, shell } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -9,6 +9,116 @@ const DEV_URL = process.env.CUEDESIGNER_DEV_URL?.trim() || "";
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+
+/** Standard macOS/Win menu — Copy stays ⌘/Ctrl+C (never bare C). */
+function installApplicationMenu(): void {
+  const isMac = process.platform === "darwin";
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: "about" as const },
+              { type: "separator" as const },
+              { role: "services" as const },
+              { type: "separator" as const },
+              { role: "hide" as const },
+              { role: "hideOthers" as const },
+              { role: "unhide" as const },
+              { type: "separator" as const },
+              { role: "quit" as const },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: "File",
+      submenu: [isMac ? { role: "close" } : { role: "quit" }],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" }, // CommandOrControl+C — not bare C
+        { role: "paste" },
+        ...(isMac
+          ? [
+              { role: "pasteAndMatchStyle" as const },
+              { role: "delete" as const },
+              { role: "selectAll" as const },
+            ]
+          : [
+              { role: "delete" as const },
+              { type: "separator" as const },
+              { role: "selectAll" as const },
+            ]),
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        { role: "zoom" },
+        ...(isMac
+          ? [
+              { type: "separator" as const },
+              { role: "front" as const },
+            ]
+          : [{ role: "close" as const }]),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/**
+ * Bare letter keys must reach the page (Click = C). While ⌘/Ctrl is held,
+ * keep menu accelerators (Copy etc.). Also IPC-nudge toggle-click for bare C
+ * so macOS menu handling cannot silently drop renderer keydown.
+ */
+function wireShortcutBridge(win: BrowserWindow): void {
+  win.webContents.on("before-input-event", (event, input) => {
+    const chord = input.control || input.meta || input.alt;
+    // Electron docs: ignore menu shortcuts when typing unmodified keys.
+    win.webContents.setIgnoreMenuShortcuts(!chord);
+
+    if (input.type !== "keyDown" || input.isAutoRepeat || chord) return;
+
+    const code = input.code || "";
+    const key = (input.key || "").toLowerCase();
+    const isClick = code === "KeyC" || key === "c";
+    if (!isClick) return;
+
+    // Claim bare C for Click — blocks menu from swallowing it. Renderer listens
+    // on cue:shortcut (preload) and cuedesigner-shortcut (JS fallback); DOM
+    // keydown may not fire after preventDefault.
+    event.preventDefault();
+    win.webContents.send("cue:shortcut", "toggle-click");
+    void win.webContents
+      .executeJavaScript(
+        `window.dispatchEvent(new CustomEvent('cuedesigner-shortcut',{detail:{action:'toggle-click'}}))`,
+      )
+      .catch(() => undefined);
+  });
+}
 
 function webDistIndex(): string {
   // Unpackaged (`electron .` after npm run build): ALWAYS prefer the workspace
@@ -77,6 +187,7 @@ function createWindow(): void {
 
   win.once("ready-to-show", () => win.show());
   win.webContents.setBackgroundThrottling(false);
+  wireShortcutBridge(win);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -110,6 +221,7 @@ function createWindow(): void {
     console.log(
       `[CueDesigner] loading ${app.isPackaged ? "packaged" : "unpackaged"} UI from ${index}`,
     );
+    console.log("[CueDesigner] shortcut bridge: bare C → toggle Click (⌘C stays Copy)");
     void win.loadFile(index);
   }
 }
@@ -127,6 +239,7 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     app.setName("CueDesigner");
+    installApplicationMenu();
 
     if (process.platform === "darwin") {
       app.setAboutPanelOptions({

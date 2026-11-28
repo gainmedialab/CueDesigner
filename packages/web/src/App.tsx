@@ -65,6 +65,7 @@ import {
   loadWaveformData,
   type WaveformData,
 } from "./audio";
+import { matchTransportShortcut } from "./shortcuts";
 import {
   MEDIA_EMBED_MAX_BYTES,
   blobToDataUrl,
@@ -709,9 +710,25 @@ export function App() {
   chaseOnlyRef.current = chaseOnly;
   const metronomeEnabledRef = useRef(project.settings.metronomeEnabled);
   metronomeEnabledRef.current = project.settings.metronomeEnabled;
+  /** Dedupe DOM keydown + Electron IPC/CustomEvent for the same physical C. */
+  const lastClickShortcutMsRef = useRef(0);
+
+  const toggleClickFromShortcut = useCallback(() => {
+    const now = performance.now();
+    if (now - lastClickShortcutMsRef.current < 80) return;
+    lastClickShortcutMsRef.current = now;
+    const on = !metronomeEnabledRef.current;
+    if (on) metronomeRef.current?.auditionSync();
+    setProject((p) => updateSettings(p, { metronomeEnabled: on }));
+    setStatus(on ? "Click on (C)" : "Click off (C)");
+  }, []);
+
+  const toggleClickFromShortcutRef = useRef(toggleClickFromShortcut);
+  toggleClickFromShortcutRef.current = toggleClickFromShortcut;
 
   // Space / F / G / H / S / J / C — transport / grid-bar / zoom / Click paths.
   // Does not touch MES or lockToMediaClock; C only toggles enable + audition.
+  // Electron also nudges C via preload IPC (macOS menu can drop bare-C keydown).
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
     const isTextEntryTarget = (el: EventTarget | null): boolean => {
@@ -761,11 +778,9 @@ export function App() {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.repeat) return;
       // Suspend transport shortcuts while Export dialog is open (Escape closes).
       if (exportOpenRef.current) {
-        if (e.code === "Escape") {
+        if (e.code === "Escape" || e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
           setExportOpen(false);
@@ -774,20 +789,19 @@ export function App() {
       }
       if (isTextEntryTarget(e.target)) return;
 
-      // Prefer e.code so layout / modifiers don't break letter matching.
-      const code = e.code;
-      if (code === "Space") {
+      const action = matchTransportShortcut(e);
+      if (!action) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (action === "play") {
         // preventDefault stops focused <button> from also synthesizing click
         // (double toggle → Space looks dead). Chase-only Sync ignores Space.
-        e.preventDefault();
-        e.stopPropagation();
         if (chaseOnlyRef.current) return;
         void togglePlayRef.current();
         return;
       }
-      if (code === "KeyF") {
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "follow") {
         setFollowPlayhead((prev) => {
           const next = !prev;
           if (next) setFollowSuspended(false);
@@ -795,52 +809,55 @@ export function App() {
         });
         return;
       }
-      if (code === "KeyG") {
-        // Zoom out around playhead — same as − button.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "zoomOut") {
         zoomAroundPlayheadRef.current(zoomRef.current / ZOOM_STEP);
         return;
       }
-      if (code === "KeyH") {
-        // Zoom in around playhead — same as + button.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "zoomIn") {
         zoomAroundPlayheadRef.current(zoomRef.current * ZOOM_STEP);
         return;
       }
-      if (code === "KeyS") {
-        // Magnetic snap toggle — same as checkbox.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "snap") {
         setProject((p) =>
           updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
         );
         return;
       }
-      if (code === "KeyJ") {
-        // Home — seek to start (same as transport ⇤). Chase-only: no file seek.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "home") {
         if (chaseOnlyRef.current) return;
         seekRef.current(0);
         return;
       }
-      if (code === "KeyC") {
-        // Toggle Click — same as checkbox; audition unlocks Web Audio on enable.
-        e.preventDefault();
-        e.stopPropagation();
-        const on = !metronomeEnabledRef.current;
-        if (on) metronomeRef.current?.auditionSync();
-        setProject((p) =>
-          updateSettings(p, { metronomeEnabled: on }),
-        );
+      if (action === "click") {
+        toggleClickFromShortcutRef.current();
+      }
+    };
+
+    const onDesktopShortcut = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ action?: string }>).detail;
+      if (detail?.action === "toggle-click") {
+        if (exportOpenRef.current) return;
+        if (isTextEntryTarget(document.activeElement)) return;
+        toggleClickFromShortcutRef.current();
       }
     };
 
     // Capture on document so we see keys even when focus is on controls.
     document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
+    // Electron bare-C bridge (IPC + CustomEvent); deduped with DOM keydown.
+    window.addEventListener("cuedesigner-shortcut", onDesktopShortcut);
+    const unsubDesktop = window.cueDesktop?.onShortcut((action) => {
+      if (action !== "toggle-click") return;
+      if (exportOpenRef.current) return;
+      if (isTextEntryTarget(document.activeElement)) return;
+      toggleClickFromShortcutRef.current();
+    });
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("cuedesigner-shortcut", onDesktopShortcut);
+      unsubDesktop?.();
+    };
   }, []);
 
   const clearPlaybackMedia = useCallback(() => {
@@ -1667,6 +1684,7 @@ export function App() {
         <label className="grid-field checkbox">
           <input
             type="checkbox"
+            data-testid="metronome-click"
             checked={project.settings.metronomeEnabled}
             onChange={(e) => {
               const on = e.target.checked;
@@ -1675,10 +1693,11 @@ export function App() {
               setProject((p) =>
                 updateSettings(p, { metronomeEnabled: on }),
               );
+              setStatus(on ? "Click on" : "Click off");
             }}
             title="Click on the BPM beat grid while playing (accent on downbeat). Shortcut: C"
           />
-          Click
+          Click <kbd>C</kbd>
         </label>
         <label className="grid-field click-vol-field">
           Vol

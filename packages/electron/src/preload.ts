@@ -1,7 +1,19 @@
 /**
- * Preload is intentionally empty for Phase 1 chase.
- * LTC uses Web Audio getUserMedia; MTC uses Web MIDI in the renderer —
- * both work in Electron Chromium without a native bridge. A preload bridge
- * can land later for exclusive device access or Windows MIDI ports.
+ * Desktop bridge: main-process shortcut nudges (bare C on macOS can be eaten
+ * by the application menu path before renderer keydown). Web builds ignore this.
  */
-export {};
+import { contextBridge, ipcRenderer } from "electron";
+
+export type CueDesktopShortcut = "toggle-click";
+
+contextBridge.exposeInMainWorld("cueDesktop", {
+  onShortcut(cb: (action: CueDesktopShortcut) => void): () => void {
+    const listener = (_event: unknown, action: unknown) => {
+      if (action === "toggle-click") cb(action);
+    };
+    ipcRenderer.on("cue:shortcut", listener);
+    return () => {
+      ipcRenderer.removeListener("cue:shortcut", listener);
+    };
+  },
+});
