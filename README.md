@@ -34,11 +34,10 @@ Open http://localhost:5173
 
 ## Electron (macOS)
 
-Build the web UI first, then run the shell:
+Build the web UI first, then run the shell unpackaged:
 
 ```bash
-npm run build -w @cuedesigner/web
-npm run build -w @cuedesigner/electron
+npm run build
 npm run start -w @cuedesigner/electron
 ```
 
@@ -48,8 +47,18 @@ Dev against the Vite server:
 # terminal 1
 npm run dev:web
 # terminal 2
-CUEDESIGNER_DEV_URL=http://localhost:5173 npm run dev -w @cuedesigner/electron
+CUEDESIGNER_DEV_URL=http://localhost:5173 npm run dev:electron
 ```
+
+### Package a macOS DMG / zip
+
+Requires a **macOS** host. Builds core + web, copies the renderer into the Electron package, then runs electron-builder:
+
+```bash
+npm run package:mac
+```
+
+Artifacts land in `packages/electron/release/` (`.app` inside the DMG, plus a `.zip`). Local builds are unsigned for show-floor testing — see [`packages/electron/README.md`](packages/electron/README.md) for signing / notarization env vars and universal binaries.
 
 ## Typecheck
 

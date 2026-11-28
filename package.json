@@ -11,7 +11,8 @@
     "typecheck": "npm run build -w @cuedesigner/core && npm run typecheck -w @cuedesigner/core && npm run typecheck -w @cuedesigner/web && npm run typecheck -w @cuedesigner/electron",
     "dev:web": "npm run dev -w @cuedesigner/web",
     "dev:electron": "npm run dev -w @cuedesigner/electron",
-    "start:web": "npm run preview -w @cuedesigner/web"
+    "start:web": "npm run preview -w @cuedesigner/web",
+    "package:mac": "npm run build -w @cuedesigner/core && npm run build -w @cuedesigner/web && npm run package:mac -w @cuedesigner/electron"
   },
   "engines": {
     "node": ">=20"

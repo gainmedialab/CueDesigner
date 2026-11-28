@@ -1,0 +1,66 @@
+# CueDesigner — macOS-first desktop packaging (Windows deferred).
+# Unsigned local builds work for show-floor testing; set CSC_LINK /
+# APPLE_ID env vars on a Mac CI host when you are ready to sign/notarize.
+
+appId: com.gainmedialab.cuedesigner
+productName: CueDesigner
+executableName: CueDesigner
+copyright: Copyright © gainmedialab
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+
+# Avoid shipping the scoped workspace name (@cuedesigner/electron) into the binary.
+extraMetadata:
+  name: cuedesigner
+
+# npm workspaces hoist electron to the repo root; pin so electron-builder
+# does not need packages/electron/node_modules/electron for version detection.
+electronVersion: 34.5.8
+
+# Renderer is pre-copied (no native addons). Skip install-app-deps so
+# workspace hoisting is not torn down mid-pack.
+npmRebuild: false
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - renderer/**/*
+  - package.json
+
+asar: true
+
+mac:
+  category: public.app-category.music
+  # Local/dev builds skip signing unless CSC_* credentials are present.
+  identity: null
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: CueDesigner needs microphone access to chase LTC from an audio input.
+    NSBluetoothAlwaysUsageDescription: CueDesigner may use Bluetooth MIDI interfaces when available.
+  # Default = host arch. On Apple Silicon Macs pass `--universal` for a
+  # universal binary once you are cutting a release for mixed show machines.
+  target:
+    - dmg
+    - zip
+
+dmg:
+  title: CueDesigner ${version}
+  writeUpdateInfo: false
+
+# Optional notarization (Apple Developer). Leave unset for unsigned local DMG/zip.
+# electron-builder reads these when present:
+#   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+# Or afterPack/afterSign hooks can call @electron/notarize.
+
+linux:
+  # Not a product target yet — useful for CI smoke of the unpackaged tree on Linux agents.
+  target:
+    - dir
+  category: AudioVideo
+
+# Windows packaging is intentionally omitted until Phase 2+.
