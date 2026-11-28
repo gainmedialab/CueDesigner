@@ -3,16 +3,21 @@ import {
   clampBpm,
   clampTimelineZoom,
   copyCuesToDepartments,
+  countdownDeptScopeLabel,
+  countdownToCueSec,
   createCue,
   createId,
   createProject,
+  COUNTDOWN_DEPT_SCOPES,
   deleteCue,
   deleteDepartment,
   deleteCuesForDepartment,
   buildSharePackage,
   deserializeProject,
   emptySyncStatus,
+  findNextCue,
   formatAbsoluteTime,
+  formatCountdownAbs,
   formatMusicalPosition,
   formatTime,
   formatTimecode,
@@ -20,10 +25,14 @@ import {
   GRID_RESOLUTIONS,
   gridLineTimes,
   gridResolutionLabel,
+  isValidLoopRegion,
   lanePercentToTime,
+  loopRegionFromPause,
+  loopWrapTarget,
   moveCue,
   musicalRulerMarkTimes,
   nextDeptCueNumber,
+  normalizeLoopPoints,
   parseSharePackage,
   parseTime,
   parseTimecode,
@@ -32,6 +41,8 @@ import {
   projectDownloadBlob,
   renameDepartment,
   recolorDepartment,
+  rehearsalLoopModeLabel,
+  REHEARSAL_LOOP_MODES,
   rulerMarkTimes,
   setProjectMedia,
   snapToGrid,
@@ -44,10 +55,12 @@ import {
   touchProject,
   updateCue,
   updateSettings,
+  type CountdownDeptScope,
   type Cue,
   type FrameRateLabel,
   type GridResolution,
   type Project,
+  type RehearsalLoopMode,
   type SyncClockSource,
   type SyncStatusSnapshot,
   type TimeDisplayMode,
@@ -150,7 +163,7 @@ export function App() {
   const [followPlayhead, setFollowPlayhead] = useState(true);
   /** Temporary pause after manual scroll; cleared on Play or re-checking Follow. */
   const [followSuspended, setFollowSuspended] = useState(false);
-  /** Export dialog open — suspends Space/F/G/H/S/J/C/N while open; transport/Click unchanged. */
+  /** Export dialog open — suspends transport shortcuts while open; transport/Click unchanged. */
   const [exportOpen, setExportOpen] = useState(false);
   /** Session clock source — Internal keeps HTMLMediaElement transport untouched. */
   const [syncSource, setSyncSource] = useState<SyncClockSource>("internal");
@@ -177,6 +190,14 @@ export function App() {
   const [ltcOutDeviceId, setLtcOutDeviceId] = useState<string>("");
   const [ltcOutChannelIndex, setLtcOutChannelIndex] = useState(0);
   const [ltcOutDevicesLoading, setLtcOutDevicesLoading] = useState(false);
+  /** Session rehearsal loop — not persisted in the project file. */
+  const [loopEnabled, setLoopEnabled] = useState(false);
+  const [loopMode, setLoopMode] = useState<RehearsalLoopMode>("ab");
+  const [loopA, setLoopA] = useState<number | null>(null);
+  const [loopB, setLoopB] = useState<number | null>(null);
+  /** Next-cue countdown department filter (All / Active / Place on). */
+  const [countdownScope, setCountdownScope] =
+    useState<CountdownDeptScope>("all");
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -220,6 +241,16 @@ export function App() {
   const currentTimeRef = useRef(0);
   currentTimeRef.current = currentTime;
   const durationRef = useRef(0);
+  /** Where the current Internal play take started (for Pause → loop). */
+  const playStartSecRef = useRef(0);
+  const loopEnabledRef = useRef(loopEnabled);
+  loopEnabledRef.current = loopEnabled;
+  const loopARef = useRef(loopA);
+  loopARef.current = loopA;
+  const loopBRef = useRef(loopB);
+  loopBRef.current = loopB;
+  const loopModeRef = useRef(loopMode);
+  loopModeRef.current = loopMode;
   const lastWaveScrollSyncMsRef = useRef(0);
   /** Current session media bytes (for save embed + IndexedDB). */
   const mediaBlobRef = useRef<Blob | null>(null);
@@ -337,7 +368,26 @@ export function App() {
     metronomeRef.current = metronome;
     metronome.setMediaTimeGetter(() => audioRef.current?.currentTime ?? 0);
     metronome.attachMediaElement(audio);
-    const onEnded = () => setPlaying(false);
+    const onEnded = () => {
+      // A–B wrap prefers RAF; if media ends with loop armed, restart at A.
+      if (
+        loopEnabledRef.current &&
+        isValidLoopRegion(loopARef.current, loopBRef.current)
+      ) {
+        const a = loopARef.current!;
+        audio.currentTime = a;
+        currentTimeRef.current = a;
+        setCurrentTime(a);
+        metronomeRef.current?.resync();
+        generateRef.current?.resync();
+        void audio.play().then(
+          () => setPlaying(true),
+          () => setPlaying(false),
+        );
+        return;
+      }
+      setPlaying(false);
+    };
     const onSeeked = () => {
       metronomeRef.current?.resync();
       generateRef.current?.resync();
@@ -599,7 +649,16 @@ export function App() {
       }
       const audio = audioRef.current;
       if (audio && playing && !external) {
-        const t = audio.currentTime;
+        let t = audio.currentTime;
+        const wrapTo = loopWrapTarget(t, loopARef.current, loopBRef.current, {
+          enabled: loopEnabledRef.current,
+        });
+        if (wrapTo != null) {
+          audio.currentTime = wrapTo;
+          t = wrapTo;
+          metronomeRef.current?.resync();
+          generateRef.current?.resync();
+        }
         currentTimeRef.current = t;
         setCurrentTime(t);
         followTransportActiveRef.current = true;
@@ -803,18 +862,83 @@ export function App() {
 
   const chaseOnly = syncSource === "ltc" || syncSource === "mtc";
 
+  const setLoopInAtPlayhead = useCallback(() => {
+    const t = currentTimeRef.current;
+    const dur = durationRef.current || 0;
+    const b = loopBRef.current;
+    if (b != null && t > b) {
+      const n = normalizeLoopPoints(t, b, dur);
+      setLoopA(n.loopA);
+      setLoopB(n.loopB);
+    } else {
+      setLoopA(Math.max(0, Math.min(t, dur || t)));
+    }
+    setStatus(`Loop In (A) @ ${formatAbsoluteTime(t)}`);
+  }, []);
+
+  const setLoopOutAtPlayhead = useCallback(() => {
+    const t = currentTimeRef.current;
+    const dur = durationRef.current || 0;
+    const a = loopARef.current;
+    if (a != null && t < a) {
+      const n = normalizeLoopPoints(a, t, dur);
+      setLoopA(n.loopA);
+      setLoopB(n.loopB);
+    } else {
+      setLoopB(Math.max(0, Math.min(t, dur || t)));
+    }
+    setStatus(`Loop Out (B) @ ${formatAbsoluteTime(t)}`);
+  }, []);
+
+  const toggleLoopEnabled = useCallback(() => {
+    setLoopEnabled((prev) => {
+      const next = !prev;
+      if (next && !isValidLoopRegion(loopARef.current, loopBRef.current)) {
+        setStatus("Loop on — set In (I) and Out (O) first");
+      } else {
+        setStatus(next ? "Loop on (L)" : "Loop off (L)");
+      }
+      return next;
+    });
+  }, []);
+
+  const setLoopInAtPlayheadRef = useRef(setLoopInAtPlayhead);
+  setLoopInAtPlayheadRef.current = setLoopInAtPlayhead;
+  const setLoopOutAtPlayheadRef = useRef(setLoopOutAtPlayhead);
+  setLoopOutAtPlayheadRef.current = setLoopOutAtPlayhead;
+  const toggleLoopEnabledRef = useRef(toggleLoopEnabled);
+  toggleLoopEnabledRef.current = toggleLoopEnabled;
+
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio || !mediaUrl) return;
     // LTC/MTC are chase-only — never start file transport from Play/Space.
     if (syncSource !== "internal") return;
     if (playing) {
+      const pauseT = audio.currentTime;
       audio.pause();
       setPlaying(false);
       suppressScrollFollowPauseRef.current = false;
+      // Pause-loop mode: capture play-start → pause as A–B and arm wrap.
+      if (loopModeRef.current === "pause") {
+        const region = loopRegionFromPause(
+          playStartSecRef.current,
+          pauseT,
+          durationRef.current || audio.duration || 0,
+        );
+        if (region) {
+          setLoopA(region.loopA);
+          setLoopB(region.loopB);
+          setLoopEnabled(true);
+          setStatus(
+            `Pause loop ${formatAbsoluteTime(region.loopA)} → ${formatAbsoluteTime(region.loopB)}`,
+          );
+        }
+      }
     } else {
       // Clear scroll suspension; checkbox preference stays latched.
       setFollowSuspended(false);
+      playStartSecRef.current = audio.currentTime;
       try {
         // Start media immediately (native element). Click AudioContext resume
         // is non-blocking — never await click priming before audio.play().
@@ -870,8 +994,8 @@ export function App() {
   const placeCueFromShortcutRef = useRef(placeCueFromShortcut);
   placeCueFromShortcutRef.current = placeCueFromShortcut;
 
-  // Space / F / G / H / S / J / C / N — transport / grid / Click / place-cue.
-  // Does not touch MES or lockToMediaClock.
+  // Space / F / G / H / S / J / C / N / I / O / L — transport / grid / Click /
+  // place-cue / rehearsal loop. Does not touch MES or lockToMediaClock.
   // Electron also nudges C/N via preload IPC (macOS menu can drop bare keydown).
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
@@ -974,6 +1098,21 @@ export function App() {
       }
       if (action === "click") {
         toggleClickFromShortcutRef.current();
+        return;
+      }
+      if (action === "setLoopIn") {
+        if (chaseOnlyRef.current) return;
+        setLoopInAtPlayheadRef.current();
+        return;
+      }
+      if (action === "setLoopOut") {
+        if (chaseOnlyRef.current) return;
+        setLoopOutAtPlayheadRef.current();
+        return;
+      }
+      if (action === "toggleLoop") {
+        if (chaseOnlyRef.current) return;
+        toggleLoopEnabledRef.current();
         return;
       }
       if (action === "placeCue") {
@@ -1517,6 +1656,24 @@ export function App() {
     tcOffsetDraft ??
     formatTimecode(project.settings.showTcOffsetSec, project.settings.fps);
 
+  const countdownDeptIds =
+    countdownScope === "active"
+      ? activeDeptId
+        ? [activeDeptId]
+        : []
+      : countdownScope === "placeOn"
+        ? placeDeptIds
+        : null;
+  const nextCue = findNextCue(project.cues, currentTime, {
+    departmentIds: countdownDeptIds,
+  });
+  const nextCueRemainSec = countdownToCueSec(nextCue, currentTime);
+  const nextCueDept = nextCue
+    ? project.departments.find((d) => d.id === nextCue.departmentId)
+    : null;
+  const loopRegionValid = isValidLoopRegion(loopA, loopB);
+  const loopArmed = loopEnabled && loopRegionValid;
+
   const commitInspectorTime = () => {
     if (inspectorTimeDraft == null || !selectedCueId) {
       setInspectorTimeDraft(null);
@@ -1683,6 +1840,58 @@ export function App() {
         <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
           {clockEnd}
         </span>
+        <div
+          className="countdown-block"
+          aria-label="Countdown to next cue"
+          title={
+            nextCue
+              ? `Next cue ${nextCue.cueNoDept} ${nextCue.label} at ${formatTime(nextCue.tAbs, timeMode, project.settings)}`
+              : "No cue after playhead in the selected department scope"
+          }
+        >
+          <span className="countdown-label">Next</span>
+          <span className="countdown-time" aria-live="polite">
+            {nextCueRemainSec != null
+              ? formatCountdownAbs(nextCueRemainSec)
+              : "—"}
+          </span>
+          <span className="countdown-meta">
+            {nextCue ? (
+              <>
+                <span
+                  className="countdown-dept"
+                  style={{ color: nextCueDept?.color ?? "var(--text-muted)" }}
+                >
+                  {nextCueDept?.name ?? "?"}
+                </span>
+                {" "}
+                {nextCue.cueNoDept} {nextCue.label}
+                <span className="countdown-abs">
+                  {" · "}
+                  {formatTime(nextCue.tAbs, timeMode, project.settings)}
+                </span>
+              </>
+            ) : (
+              <span className="countdown-empty">no cue ahead</span>
+            )}
+          </span>
+          <label className="countdown-scope-field">
+            <select
+              value={countdownScope}
+              aria-label="Next-cue department scope"
+              title="Filter which departments the next-cue countdown considers"
+              onChange={(e) =>
+                setCountdownScope(e.target.value as CountdownDeptScope)
+              }
+            >
+              {COUNTDOWN_DEPT_SCOPES.map((scope) => (
+                <option key={scope} value={scope}>
+                  {countdownDeptScopeLabel(scope)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <button
           type="button"
           onClick={(e) => placeAtPlayhead(e.altKey)}
@@ -2057,6 +2266,110 @@ export function App() {
         </div>
       </div>
 
+      <div className="rehearsal-bar" aria-label="Rehearsal loop">
+        <span className="rehearsal-title">Loop</span>
+        <div
+          className="mode-switch"
+          role="group"
+          aria-label="Rehearsal loop mode"
+        >
+          {REHEARSAL_LOOP_MODES.map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={loopMode === mode ? "mode-btn active" : "mode-btn"}
+              aria-pressed={loopMode === mode}
+              disabled={chaseOnly}
+              title={
+                mode === "ab"
+                  ? "Manual A–B: set In/Out, then arm Loop"
+                  : "On Pause, capture play-start → pause as A–B and arm Loop"
+              }
+              onClick={() => setLoopMode(mode)}
+            >
+              {rehearsalLoopModeLabel(mode)}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          disabled={!mediaUrl || chaseOnly}
+          title="Set loop In (A) at playhead (I)"
+          onClick={setLoopInAtPlayhead}
+        >
+          In <kbd>I</kbd>
+          {loopA != null ? (
+            <span className="loop-point-val">
+              {" "}
+              {formatTime(loopA, timeMode, project.settings)}
+            </span>
+          ) : null}
+        </button>
+        <button
+          type="button"
+          disabled={!mediaUrl || chaseOnly}
+          title="Set loop Out (B) at playhead (O)"
+          onClick={setLoopOutAtPlayhead}
+        >
+          Out <kbd>O</kbd>
+          {loopB != null ? (
+            <span className="loop-point-val">
+              {" "}
+              {formatTime(loopB, timeMode, project.settings)}
+            </span>
+          ) : null}
+        </button>
+        <label
+          className={`loop-arm${loopArmed ? " armed" : ""}${loopEnabled && !loopRegionValid ? " incomplete" : ""}`}
+          title={
+            chaseOnly
+              ? "Loop wrap needs Internal Sync (file transport)"
+              : loopRegionValid
+                ? "While playing, wrap from Out (B) back to In (A)"
+                : "Set In and Out (min ~50 ms span) before arming"
+          }
+        >
+          <input
+            type="checkbox"
+            checked={loopEnabled}
+            disabled={!mediaUrl || chaseOnly}
+            aria-label="Arm rehearsal loop"
+            onChange={(e) => {
+              const on = e.target.checked;
+              setLoopEnabled(on);
+              if (on && !isValidLoopRegion(loopA, loopB)) {
+                setStatus("Loop on — set In (I) and Out (O) first");
+              } else {
+                setStatus(on ? "Loop on" : "Loop off");
+              }
+            }}
+          />
+          Loop <kbd>L</kbd>
+        </label>
+        <button
+          type="button"
+          disabled={loopA == null && loopB == null}
+          title="Clear In/Out and disarm loop"
+          onClick={() => {
+            setLoopA(null);
+            setLoopB(null);
+            setLoopEnabled(false);
+            setStatus("Loop cleared");
+          }}
+        >
+          Clear
+        </button>
+        <span className="rehearsal-hint" aria-live="polite">
+          {chaseOnly
+            ? "Internal Sync required for loop wrap"
+            : loopArmed
+              ? `Wrapping ${formatAbsoluteTime(loopA!)} → ${formatAbsoluteTime(loopB!)}`
+              : loopMode === "pause"
+                ? "Play a take, Pause to capture A–B"
+                : "Set In / Out, then arm Loop"}
+        </span>
+      </div>
+
       <div className="grid-bar" aria-label="BPM and snap settings">
         <label className="grid-field bpm-field">
           BPM
@@ -2327,7 +2640,8 @@ export function App() {
           <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
           <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
           <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click ·{" "}
-          <kbd>N</kbd> cue at playhead (checked depts) · ⌘/Ctrl-click multi-select cues
+          <kbd>N</kbd> cue at playhead (checked depts) · <kbd>I</kbd>/<kbd>O</kbd>{" "}
+          loop In/Out · <kbd>L</kbd> loop · ⌘/Ctrl-click multi-select cues
         </span>
       </div>
 
@@ -2558,6 +2872,34 @@ export function App() {
                             />
                           );
                         })}
+                      {loopRegionValid && loopA != null && loopB != null ? (
+                        <div
+                          className={`loop-region${loopArmed ? " armed" : ""}`}
+                          style={{
+                            left: `${timeToLanePercent(loopA, duration)}%`,
+                            width: `${Math.max(0, timeToLanePercent(loopB, duration) - timeToLanePercent(loopA, duration))}%`,
+                          }}
+                          title={`Loop ${formatAbsoluteTime(loopA)} → ${formatAbsoluteTime(loopB)}`}
+                        />
+                      ) : null}
+                      {loopA != null ? (
+                        <div
+                          className="loop-marker loop-marker-a"
+                          style={{
+                            left: `${timeToLanePercent(loopA, duration)}%`,
+                          }}
+                          title={`Loop In (A) ${formatTime(loopA, timeMode, project.settings)}`}
+                        />
+                      ) : null}
+                      {loopB != null ? (
+                        <div
+                          className="loop-marker loop-marker-b"
+                          style={{
+                            left: `${timeToLanePercent(loopB, duration)}%`,
+                          }}
+                          title={`Loop Out (B) ${formatTime(loopB, timeMode, project.settings)}`}
+                        />
+                      ) : null}
                       <div
                         className="playhead"
                         style={{ left: `${playheadPct}%` }}

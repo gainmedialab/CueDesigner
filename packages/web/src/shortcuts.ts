@@ -1,4 +1,4 @@
-/** Transport / grid shortcuts shared by App + tests. */
+/** Transport / grid / rehearsal shortcuts shared by App + tests. */
 
 export type TransportShortcut =
   | "play"
@@ -8,7 +8,10 @@ export type TransportShortcut =
   | "snap"
   | "home"
   | "click"
-  | "placeCue";
+  | "placeCue"
+  | "setLoopIn"
+  | "setLoopOut"
+  | "toggleLoop";
 
 export interface ShortcutKeyLike {
   code?: string;
@@ -24,6 +27,9 @@ export interface ShortcutKeyLike {
  * Prefers `code` (physical), falls back to `key` (layout / Electron before-input).
  * Ignores Ctrl/⌘ chords (Electron Edit menu owns ⌘C copy).
  * Alt is ignored except for **N** (free / unsnapped cue, same as Cue-at-playhead button).
+ *
+ * Existing: Space / F / G / H / S / J / C / N.
+ * Rehearsal: **I** set loop In (A), **O** set loop Out (B), **L** toggle loop.
  */
 export function matchTransportShortcut(
   e: ShortcutKeyLike,
@@ -44,5 +50,8 @@ export function matchTransportShortcut(
   if (code === "KeyS" || key === "s") return "snap";
   if (code === "KeyJ" || key === "j") return "home";
   if (code === "KeyC" || key === "c") return "click";
+  if (code === "KeyI" || key === "i") return "setLoopIn";
+  if (code === "KeyO" || key === "o") return "setLoopOut";
+  if (code === "KeyL" || key === "l") return "toggleLoop";
   return null;
 }
