@@ -18,6 +18,16 @@ export type CueDesktopFileAction =
   | "share"
   | "export";
 
+export type CueDesktopFileOpenPayload = {
+  action: "open" | "open-shared";
+  name: string;
+  base64: string;
+};
+
+export type CueDesktopFilePayload =
+  | CueDesktopFileAction
+  | CueDesktopFileOpenPayload;
+
 const SHORTCUT_ACTIONS = new Set<CueDesktopShortcut>([
   "toggle-click",
   "place-cue",
@@ -32,6 +42,19 @@ const FILE_ACTIONS = new Set<CueDesktopFileAction>([
   "share",
   "export",
 ]);
+
+function isFilePayload(value: unknown): value is CueDesktopFilePayload {
+  if (typeof value === "string") {
+    return FILE_ACTIONS.has(value as CueDesktopFileAction);
+  }
+  if (!value || typeof value !== "object") return false;
+  const obj = value as { action?: unknown; name?: unknown; base64?: unknown };
+  return (
+    (obj.action === "open" || obj.action === "open-shared") &&
+    typeof obj.name === "string" &&
+    typeof obj.base64 === "string"
+  );
+}
 
 contextBridge.exposeInMainWorld("cueDesktop", {
   isDesktop: true,
@@ -49,18 +72,20 @@ contextBridge.exposeInMainWorld("cueDesktop", {
       ipcRenderer.removeListener("cue:shortcut", listener);
     };
   },
-  onFileAction(cb: (action: CueDesktopFileAction) => void): () => void {
-    const listener = (_event: unknown, action: unknown) => {
-      if (
-        typeof action === "string" &&
-        FILE_ACTIONS.has(action as CueDesktopFileAction)
-      ) {
-        cb(action as CueDesktopFileAction);
-      }
+  onFileAction(cb: (payload: CueDesktopFilePayload) => void): () => void {
+    const listener = (_event: unknown, payload: unknown) => {
+      if (isFilePayload(payload)) cb(payload);
     };
     ipcRenderer.on("cue:file", listener);
     return () => {
       ipcRenderer.removeListener("cue:file", listener);
     };
+  },
+  /** Native Save dialog — avoids Chromium blocking programmatic <a download>. */
+  saveFile(opts: {
+    defaultPath: string;
+    data: ArrayBuffer;
+  }): Promise<{ ok: true; filePath: string } | { ok: false; reason?: string }> {
+    return ipcRenderer.invoke("cue:save-file", opts);
   },
 });

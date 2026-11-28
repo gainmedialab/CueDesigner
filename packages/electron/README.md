@@ -75,7 +75,17 @@ Then remove or override `mac.identity: null` and re-run `npm run package:mac`. e
 
 ## Application menu (macOS HIG)
 
-The native **File** menu owns New / Open… / Open Shared… / Save / Share… / Export… (with standard ⌘ accelerators). The web UI hides its in-app File dropdown when `cueDesktop` is present and keeps **Edit Mode / Show Mode** + **Import audio** in the window chrome. Bare **C** / **N** still bridge to Click / cue-at-playhead so the Edit menu’s ⌘C Copy is never stolen.
+The native **File** menu owns New / Open… / Open Shared… / Save / Share… / Export… (with standard ⌘ accelerators). Delivery is `cue:file` IPC (preload `onFileAction`) plus a `cuedesigner-file` CustomEvent fallback for string actions — same dual-path idea as the C/N shortcut bridge. **Open** / **Open Shared** use `dialog.showOpenDialog` and send file bytes; **Save** / **Share** use `dialog.showSaveDialog` via `cue:save-file` so Chromium cannot block a gesture-less `<a download>`.
+
+The web UI hides its in-app File dropdown when `cueDesktop` is present and keeps **Edit Mode / Show Mode** + **Import audio** in the window chrome. Bare **C** / **N** still bridge to Click / cue-at-playhead so the Edit menu’s ⌘C Copy is never stolen.
+
+After pulling File-menu fixes, wipe a stale copied renderer before rebuild:
+
+```bash
+rm -rf packages/electron/renderer
+npm run build
+npm run start -w @cuedesigner/electron
+```
 
 ## Offline show defaults
 

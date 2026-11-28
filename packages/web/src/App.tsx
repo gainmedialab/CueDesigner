@@ -234,7 +234,9 @@ export function App() {
   const fileMenuOpenRef = useRef(fileMenuOpen);
   fileMenuOpenRef.current = fileMenuOpen;
   /** Filled after New/Open/Save handlers are defined; used by keydown + desktop IPC. */
-  const runFileActionRef = useRef<(action: string) => void>(() => undefined);
+  const runFileActionRef = useRef<(payload: CueDesktopFilePayload) => void>(
+    () => undefined,
+  );
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -1167,7 +1169,7 @@ export function App() {
           e.preventDefault();
           e.stopPropagation();
           setFileMenuOpen(false);
-          runFileActionRef.current(fileAction);
+          runFileActionRef.current(fileAction as CueDesktopFileAction);
           return;
         }
       }
@@ -1279,16 +1281,30 @@ export function App() {
     document.addEventListener("keydown", onKeyDown, true);
     // Electron bare-key bridge (IPC + CustomEvent); deduped with DOM keydown.
     window.addEventListener("cuedesigner-shortcut", onDesktopShortcut);
+    const onDesktopFile = (ev: Event) => {
+      const detail = (ev as CustomEvent<CueDesktopFilePayload>).detail;
+      if (detail != null) runFileActionRef.current(detail);
+    };
+
     const unsubDesktop = window.cueDesktop?.onShortcut((action) => {
       runDesktopAction(action);
     });
-    const unsubFile = window.cueDesktop?.onFileAction?.((action) => {
-      runFileActionRef.current(action);
+    // Prefer preload IPC. CustomEvent is only for stale preloads that lack onFileAction
+    // (main still dual-dispatches string actions — avoid double Save/New dialogs).
+    const unsubFile = window.cueDesktop?.onFileAction?.((payload) => {
+      runFileActionRef.current(payload);
     });
+    const useFileCustomEvent = !window.cueDesktop?.onFileAction;
+    if (useFileCustomEvent) {
+      window.addEventListener("cuedesigner-file", onDesktopFile);
+    }
 
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("cuedesigner-shortcut", onDesktopShortcut);
+      if (useFileCustomEvent) {
+        window.removeEventListener("cuedesigner-file", onDesktopFile);
+      }
       unsubDesktop?.();
       unsubFile?.();
     };
@@ -1385,6 +1401,26 @@ export function App() {
     }
   };
 
+  /** Electron Save dialog when available; otherwise <a download>. */
+  const deliverDownload = async (filename: string, fileBlob: Blob) => {
+    const saveFile = window.cueDesktop?.saveFile;
+    if (saveFile) {
+      const data = await fileBlob.arrayBuffer();
+      const result = await saveFile({ defaultPath: filename, data });
+      if (!result.ok) {
+        if (result.reason === "canceled") {
+          setStatus("Save canceled.");
+          return false;
+        }
+        setStatus("Save failed (desktop dialog).");
+        return false;
+      }
+      return true;
+    }
+    downloadBlob(filename, fileBlob);
+    return true;
+  };
+
   const onSaveProject = async () => {
     const touched = touchProject(project);
     let mediaDataUrl: string | undefined;
@@ -1410,11 +1446,9 @@ export function App() {
     }
 
     const fileBlob = projectDownloadBlob(touched, mediaDataUrl);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(fileBlob);
-    a.download = `${touched.name.replace(/[^\w.-]+/g, "_") || "show"}.cueproj.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const filename = `${touched.name.replace(/[^\w.-]+/g, "_") || "show"}.cueproj.json`;
+    const saved = await deliverDownload(filename, fileBlob);
+    if (!saved) return;
     setProject(touched);
 
     if (!project.media) {
@@ -1434,10 +1468,7 @@ export function App() {
     }
   };
 
-  const onOpenProject = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  const openProjectFromFile = async (file: File) => {
     try {
       const text = await file.text();
       const { project: loaded, mediaDataUrl } = deserializeProject(text);
@@ -1493,6 +1524,13 @@ export function App() {
     }
   };
 
+  const onOpenProject = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await openProjectFromFile(file);
+  };
+
   const onNewProject = () => {
     if (!allowShowEdit("newProject", "new project")) return;
     const previousId = project.id;
@@ -1541,7 +1579,8 @@ export function App() {
         mediaMimeType: meta?.mimeType ?? touched.media?.mimeType,
       });
       const zipBlob = buildZipBlob(packed.entries);
-      downloadBlob(packed.filename, zipBlob);
+      const saved = await deliverDownload(packed.filename, zipBlob);
+      if (!saved) return;
 
       if (packed.includedMedia && blob) {
         setStatus(
@@ -1563,10 +1602,7 @@ export function App() {
     }
   };
 
-  const onOpenSharedPackage = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
+  const openSharedFromFile = async (file: File) => {
     try {
       setStatus(`Opening shared package ${file.name}…`);
       const zipEntries = await readZipEntries(file);
@@ -1646,6 +1682,22 @@ export function App() {
         `Open shared failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  };
+
+  const onOpenSharedPackage = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await openSharedFromFile(file);
+  };
+
+  const fileFromBase64 = (name: string, base64: string, mime: string): File => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new File([bytes], name, { type: mime });
   };
 
   const selectCue = (cueId: string, opts?: { toggle?: boolean }) => {
@@ -1881,12 +1933,29 @@ export function App() {
           ? "Armed"
           : "Disarmed";
 
-  runFileActionRef.current = (action: string) => {
-    switch (action) {
+  runFileActionRef.current = (payload: CueDesktopFilePayload) => {
+    // Native dialog already chose a file (Electron Open / Open Shared).
+    if (typeof payload === "object") {
+      if (payload.action === "open") {
+        void openProjectFromFile(
+          fileFromBase64(payload.name, payload.base64, "application/json"),
+        );
+        return;
+      }
+      if (payload.action === "open-shared") {
+        void openSharedFromFile(
+          fileFromBase64(payload.name, payload.base64, "application/zip"),
+        );
+        return;
+      }
+    }
+
+    switch (payload) {
       case "new":
         onNewProject();
         break;
       case "open":
+        // Web / fallback — Electron prefers native dialog + base64 payload.
         projectInputRef.current?.click();
         break;
       case "open-shared":
