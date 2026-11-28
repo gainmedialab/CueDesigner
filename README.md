@@ -71,7 +71,8 @@ npm run typecheck
 - **Project:** New / Open / Save offline `.cueproj.json` (no network)
 - **Audio:** Import WAV / AIFF / MP3 (and common browser-decodable formats); play / pause / scrub
 - **Departments:** Seeded defaults (Pyro/SFX, Lighting, Audio, Cameras) + add / rename / recolour / delete
-- **Cues:** Place at playhead or double-click track; select, drag-move, edit, delete; per-department cue numbers + global ordinal
+- **Cues:** Place at playhead or double-click track; select, drag-move, edit, delete
+- **Cue numbering:** Primary **per-department** numbers (decimals allowed, e.g. Lighting `5.1`, Pyro `12`); **global ordinal** is the auto show-order index from absolute time (master list / SM). Place / copy / multi-dept assign the next whole number per department. Timeline markers + cue list show the dept number; list and inspector show `#ordinal`. Exports (MagicQ / grandMA / SFX / generic) lead with dept numbers.
 - **Multi-dept:** Check **Place on** departments then **N** / Cue at playhead creates one cue per checked dept; **Copy to…** duplicates selected cue(s) onto other departments (same time, new per-dept numbers)
 - **Shell:** Electron loads the same web UI / schema on macOS
 

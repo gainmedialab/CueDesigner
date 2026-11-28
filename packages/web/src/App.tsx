@@ -32,6 +32,7 @@ import {
   moveCue,
   musicalRulerMarkTimes,
   nextDeptCueNumber,
+  normalizeDeptCueNumber,
   normalizeLoopPoints,
   parseSharePackage,
   parseTime,
@@ -2329,7 +2330,7 @@ export function App() {
           aria-label="Countdown to next cue"
           title={
             nextCue
-              ? `Next cue ${nextCue.cueNoDept} ${nextCue.label} at ${formatTime(nextCue.tAbs, timeMode, project.settings)}`
+              ? `Next #${nextCue.ordinalGlobal} · ${nextCue.cueNoDept} ${nextCue.label} at ${formatTime(nextCue.tAbs, timeMode, project.settings)}`
               : "No cue after playhead in the selected department scope"
           }
         >
@@ -3656,9 +3657,13 @@ export function App() {
                               key={c.id}
                               className={`cue-marker${selectedCueIds.includes(c.id) ? " selected" : ""}`}
                               style={{ left, background: d.color }}
-                              title={`${c.cueNoDept} ${c.label} · ${formatTime(c.tAbs, timeMode, project.settings)}`}
+                              title={`#${c.ordinalGlobal} · ${c.cueNoDept} ${c.label} · ${formatTime(c.tAbs, timeMode, project.settings)}`}
                               onPointerDown={(e) => onCuePointerDown(e, c)}
-                            />
+                            >
+                              <span className="cue-marker-label" aria-hidden>
+                                {c.cueNoDept}
+                              </span>
+                            </div>
                           );
                         })}
                       {loopRegionValid && loopA != null && loopB != null ? (
@@ -3712,18 +3717,24 @@ export function App() {
                   <li
                     key={c.id}
                     className={`cue-row${selectedCueIds.includes(c.id) ? " selected" : ""}`}
+                    title={`Show order #${c.ordinalGlobal} · ${dept?.name ?? "?"} ${c.cueNoDept}`}
                     onClick={(e) => {
                       selectCue(c.id, { toggle: e.metaKey || e.ctrlKey });
                       seek(c.tAbs);
                     }}
                   >
+                    <span className="ordinal" title="Global show-order ordinal">
+                      #{c.ordinalGlobal}
+                    </span>
                     <span className="t">
                       {formatTime(c.tAbs, timeMode, project.settings)}
                     </span>
                     <span className="label">
                       <span style={{ color: dept?.color }}>{dept?.name ?? "?"}</span>
-                      {" · "}
-                      {c.cueNoDept} {c.label}
+                      {" "}
+                      <span className="dept-cue-no">{c.cueNoDept}</span>
+                      {" "}
+                      {c.label}
                     </span>
                   </li>
                 );
@@ -3760,12 +3771,15 @@ export function App() {
                 />
               </label>
               <label>
-                Dept cue #
+                Department cue #
                 <input
                   type="text"
+                  inputMode="decimal"
+                  spellCheck={false}
                   value={selectedCue.cueNoDept}
                   disabled={editsLocked}
                   readOnly={editsLocked}
+                  title="Per-department cue number (decimals allowed, e.g. 5.1)"
                   onChange={(e) => {
                     if (!allowShowEdit("updateCue", "edit cue")) return;
                     setProject((p) =>
@@ -3777,8 +3791,32 @@ export function App() {
                       }),
                     );
                   }}
+                  onBlur={(e) => {
+                    if (editsLocked) return;
+                    const normalized = normalizeDeptCueNumber(e.target.value);
+                    if (!normalized || normalized === selectedCue.cueNoDept) return;
+                    if (!allowShowEdit("updateCue", "edit cue")) return;
+                    setProject((p) =>
+                      touchProject({
+                        ...p,
+                        cues: updateCue(p.cues, selectedCue.id, {
+                          cueNoDept: normalized,
+                        }),
+                      }),
+                    );
+                  }}
                 />
               </label>
+              <div
+                className="inspector-ordinal"
+                title="Show-order index from absolute time (auto; master list / SM)"
+              >
+                <span className="inspector-ordinal-label">Global ordinal</span>
+                <span className="inspector-ordinal-value">
+                  #{selectedCue.ordinalGlobal}
+                </span>
+                <span className="inspector-ordinal-hint">auto · show order</span>
+              </div>
               <label>
                 Note
                 <input

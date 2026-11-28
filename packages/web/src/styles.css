@@ -1035,6 +1035,34 @@ button kbd {
   line-height: 1.35;
 }
 
+.inspector-ordinal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.55rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.inspector-ordinal-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.inspector-ordinal-value {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.inspector-ordinal-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: 220px 1fr 300px;
@@ -1318,15 +1346,34 @@ button kbd {
 
 .cue-marker {
   position: absolute;
-  top: 4px;
-  bottom: 4px;
-  width: 10px;
-  margin-left: -5px;
+  top: 2px;
+  bottom: 2px;
+  /* Wide enough for a short dept number; center on hit time. */
+  min-width: 10px;
+  width: max-content;
+  padding: 0 3px;
+  transform: translateX(-50%);
   border-radius: 2px;
   cursor: grab;
   z-index: 2;
   touch-action: none;
   user-select: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.cue-marker-label {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.15;
+  white-space: nowrap;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  pointer-events: none;
+  margin-top: 1px;
 }
 
 .cue-marker:active {
@@ -1361,8 +1408,9 @@ button kbd {
 
 .cue-row {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto auto 1fr;
   gap: 0.25rem 0.5rem;
+  align-items: baseline;
   padding: 0.5rem;
   border-radius: 6px;
   border: 1px solid var(--border);
@@ -1375,6 +1423,14 @@ button kbd {
   background: var(--accent-soft);
 }
 
+.cue-row .ordinal {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 1.6rem;
+}
+
 .cue-row .t {
   font-family: var(--mono);
   font-size: 0.75rem;
@@ -1383,6 +1439,11 @@ button kbd {
 
 .cue-row .label {
   font-size: 0.9rem;
+}
+
+.cue-row .dept-cue-no {
+  font-family: var(--mono);
+  font-weight: 600;
 }
 
 .inspector {
