@@ -127,7 +127,7 @@ export function App() {
   const [followPlayhead, setFollowPlayhead] = useState(true);
   /** Temporary pause after manual scroll; cleared on Play or re-checking Follow. */
   const [followSuspended, setFollowSuspended] = useState(false);
-  /** Export dialog open — suspends Space/F/G/H/S/J/C while open; transport/Click unchanged. */
+  /** Export dialog open — suspends Space/F/G/H/S/J/C/N while open; transport/Click unchanged. */
   const [exportOpen, setExportOpen] = useState(false);
   /** Session clock source — Internal keeps HTMLMediaElement transport untouched. */
   const [syncSource, setSyncSource] = useState<SyncClockSource>("internal");
@@ -710,8 +710,10 @@ export function App() {
   chaseOnlyRef.current = chaseOnly;
   const metronomeEnabledRef = useRef(project.settings.metronomeEnabled);
   metronomeEnabledRef.current = project.settings.metronomeEnabled;
-  /** Dedupe DOM keydown + Electron IPC/CustomEvent for the same physical C. */
+  /** Dedupe DOM keydown + Electron IPC/CustomEvent for the same physical key. */
   const lastClickShortcutMsRef = useRef(0);
+  const lastPlaceCueShortcutMsRef = useRef(0);
+  const placeAtPlayheadRef = useRef<(bypassSnap?: boolean) => void>(() => undefined);
 
   const toggleClickFromShortcut = useCallback(() => {
     const now = performance.now();
@@ -726,9 +728,19 @@ export function App() {
   const toggleClickFromShortcutRef = useRef(toggleClickFromShortcut);
   toggleClickFromShortcutRef.current = toggleClickFromShortcut;
 
-  // Space / F / G / H / S / J / C — transport / grid-bar / zoom / Click paths.
-  // Does not touch MES or lockToMediaClock; C only toggles enable + audition.
-  // Electron also nudges C via preload IPC (macOS menu can drop bare-C keydown).
+  const placeCueFromShortcut = useCallback((bypassSnap = false) => {
+    const now = performance.now();
+    if (now - lastPlaceCueShortcutMsRef.current < 80) return;
+    lastPlaceCueShortcutMsRef.current = now;
+    placeAtPlayheadRef.current(bypassSnap);
+  }, []);
+
+  const placeCueFromShortcutRef = useRef(placeCueFromShortcut);
+  placeCueFromShortcutRef.current = placeCueFromShortcut;
+
+  // Space / F / G / H / S / J / C / N — transport / grid / Click / place-cue.
+  // Does not touch MES or lockToMediaClock.
+  // Electron also nudges C/N via preload IPC (macOS menu can drop bare keydown).
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
     const isTextEntryTarget = (el: EventTarget | null): boolean => {
@@ -830,27 +842,40 @@ export function App() {
       }
       if (action === "click") {
         toggleClickFromShortcutRef.current();
+        return;
+      }
+      if (action === "placeCue") {
+        placeCueFromShortcutRef.current(e.altKey);
+      }
+    };
+
+    const runDesktopAction = (action: string) => {
+      if (exportOpenRef.current) return;
+      if (isTextEntryTarget(document.activeElement)) return;
+      if (action === "toggle-click") {
+        toggleClickFromShortcutRef.current();
+        return;
+      }
+      if (action === "place-cue") {
+        placeCueFromShortcutRef.current(false);
+        return;
+      }
+      if (action === "place-cue-free") {
+        placeCueFromShortcutRef.current(true);
       }
     };
 
     const onDesktopShortcut = (ev: Event) => {
       const detail = (ev as CustomEvent<{ action?: string }>).detail;
-      if (detail?.action === "toggle-click") {
-        if (exportOpenRef.current) return;
-        if (isTextEntryTarget(document.activeElement)) return;
-        toggleClickFromShortcutRef.current();
-      }
+      if (detail?.action) runDesktopAction(detail.action);
     };
 
     // Capture on document so we see keys even when focus is on controls.
     document.addEventListener("keydown", onKeyDown, true);
-    // Electron bare-C bridge (IPC + CustomEvent); deduped with DOM keydown.
+    // Electron bare-key bridge (IPC + CustomEvent); deduped with DOM keydown.
     window.addEventListener("cuedesigner-shortcut", onDesktopShortcut);
     const unsubDesktop = window.cueDesktop?.onShortcut((action) => {
-      if (action !== "toggle-click") return;
-      if (exportOpenRef.current) return;
-      if (isTextEntryTarget(document.activeElement)) return;
-      toggleClickFromShortcutRef.current();
+      runDesktopAction(action);
     });
 
     return () => {
@@ -1059,6 +1084,7 @@ export function App() {
       }`,
     );
   };
+  placeAtPlayheadRef.current = placeAtPlayhead;
 
   const onLanePointer = (e: ReactPointerEvent<HTMLDivElement>, deptId: string) => {
     const lane = e.currentTarget;
@@ -1337,9 +1363,9 @@ export function App() {
           type="button"
           onClick={(e) => placeAtPlayhead(e.altKey)}
           disabled={!activeDeptId}
-          title="Place cue at playhead (hold Alt for free placement)"
+          title="Place cue at playhead (N). Hold Alt for free placement (Alt+N)."
         >
-          Cue at playhead
+          Cue at playhead <kbd>N</kbd>
         </button>
         <div className="sync-block" aria-label="Timecode sync source">
           <label className="sync-source-field">
@@ -1789,7 +1815,8 @@ export function App() {
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
           <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
           <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
-          <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click
+          <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click ·{" "}
+          <kbd>N</kbd> cue at playhead
         </span>
       </div>
 

@@ -7,7 +7,8 @@ export type TransportShortcut =
   | "zoomIn"
   | "snap"
   | "home"
-  | "click";
+  | "click"
+  | "placeCue";
 
 export interface ShortcutKeyLike {
   code?: string;
@@ -21,15 +22,20 @@ export interface ShortcutKeyLike {
 /**
  * Map a key event to a transport shortcut.
  * Prefers `code` (physical), falls back to `key` (layout / Electron before-input).
- * Ignores Ctrl/⌘/Alt chords (Electron Edit menu owns ⌘C copy).
+ * Ignores Ctrl/⌘ chords (Electron Edit menu owns ⌘C copy).
+ * Alt is ignored except for **N** (free / unsnapped cue, same as Cue-at-playhead button).
  */
 export function matchTransportShortcut(
   e: ShortcutKeyLike,
 ): TransportShortcut | null {
-  if (e.ctrlKey || e.metaKey || e.altKey) return null;
+  if (e.ctrlKey || e.metaKey) return null;
   if (e.repeat) return null;
   const code = e.code ?? "";
   const key = (e.key ?? "").length === 1 ? (e.key ?? "").toLowerCase() : "";
+
+  // N allows Alt (bypass snap). Other letter shortcuts reject Alt.
+  if (code === "KeyN" || key === "n") return "placeCue";
+  if (e.altKey) return null;
 
   if (code === "Space" || key === " " || key === "spacebar") return "play";
   if (code === "KeyF" || key === "f") return "follow";

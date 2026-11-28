@@ -89,32 +89,54 @@ function installApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+type BridgedDesktopAction =
+  | "toggle-click"
+  | "place-cue"
+  | "place-cue-free";
+
 /**
- * Bare letter keys must reach the page (Click = C). While ⌘/Ctrl is held,
- * keep menu accelerators (Copy etc.). Also IPC-nudge toggle-click for bare C
- * so macOS menu handling cannot silently drop renderer keydown.
+ * Bare letter keys must reach the page (Click = C, cue = N). While ⌘/Ctrl is
+ * held, keep menu accelerators (Copy etc.). IPC-nudge claimed keys so macOS
+ * menu handling cannot silently drop renderer keydown.
  */
+function bridgedDesktopAction(input: {
+  code: string;
+  key: string;
+  control: boolean;
+  meta: boolean;
+  alt: boolean;
+}): BridgedDesktopAction | null {
+  if (input.control || input.meta) return null;
+  const code = input.code || "";
+  const key = (input.key || "").toLowerCase();
+  // N allows Alt (free / unsnapped cue).
+  if (code === "KeyN" || key === "n") {
+    return input.alt ? "place-cue-free" : "place-cue";
+  }
+  if (input.alt) return null;
+  if (code === "KeyC" || key === "c") return "toggle-click";
+  return null;
+}
+
 function wireShortcutBridge(win: BrowserWindow): void {
   win.webContents.on("before-input-event", (event, input) => {
-    const chord = input.control || input.meta || input.alt;
-    // Electron docs: ignore menu shortcuts when typing unmodified keys.
-    win.webContents.setIgnoreMenuShortcuts(!chord);
+    const cmdCtrl = input.control || input.meta;
+    // Electron docs: ignore menu shortcuts when typing without ⌘/Ctrl.
+    win.webContents.setIgnoreMenuShortcuts(!cmdCtrl);
 
-    if (input.type !== "keyDown" || input.isAutoRepeat || chord) return;
+    if (input.type !== "keyDown" || input.isAutoRepeat) return;
 
-    const code = input.code || "";
-    const key = (input.key || "").toLowerCase();
-    const isClick = code === "KeyC" || key === "c";
-    if (!isClick) return;
+    const action = bridgedDesktopAction(input);
+    if (!action) return;
 
-    // Claim bare C for Click — blocks menu from swallowing it. Renderer listens
-    // on cue:shortcut (preload) and cuedesigner-shortcut (JS fallback); DOM
+    // Claim the key — blocks menu from swallowing it. Renderer listens on
+    // cue:shortcut (preload) and cuedesigner-shortcut (JS fallback); DOM
     // keydown may not fire after preventDefault.
     event.preventDefault();
-    win.webContents.send("cue:shortcut", "toggle-click");
+    win.webContents.send("cue:shortcut", action);
     void win.webContents
       .executeJavaScript(
-        `window.dispatchEvent(new CustomEvent('cuedesigner-shortcut',{detail:{action:'toggle-click'}}))`,
+        `window.dispatchEvent(new CustomEvent('cuedesigner-shortcut',{detail:{action:${JSON.stringify(action)}}}))`,
       )
       .catch(() => undefined);
   });
@@ -221,7 +243,9 @@ function createWindow(): void {
     console.log(
       `[CueDesigner] loading ${app.isPackaged ? "packaged" : "unpackaged"} UI from ${index}`,
     );
-    console.log("[CueDesigner] shortcut bridge: bare C → toggle Click (⌘C stays Copy)");
+    console.log(
+      "[CueDesigner] shortcut bridge: bare C → Click, N → cue at playhead (⌘C stays Copy)",
+    );
     void win.loadFile(index);
   }
 }

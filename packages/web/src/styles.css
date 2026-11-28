@@ -363,7 +363,9 @@ input[type="color"] {
 }
 
 .grid-field.checkbox kbd,
-.grid-hint kbd {
+.grid-hint kbd,
+.toolbar kbd,
+button kbd {
   font-family: var(--mono);
   font-size: 0.7rem;
   border: 1px solid var(--border);
