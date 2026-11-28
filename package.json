@@ -11,6 +11,8 @@
     "typecheck": "npm run build -w @cuedesigner/core && npm run typecheck -w @cuedesigner/core && npm run typecheck -w @cuedesigner/web && npm run typecheck -w @cuedesigner/electron",
     "test:shortcuts": "node packages/web/scripts/test-shortcuts.mjs",
     "test:click-shortcut": "node packages/web/scripts/smoke-click-shortcut.mjs",
+    "test:share-package": "npm run build -w @cuedesigner/core && node packages/core/scripts/test-share-package.mjs",
+    "test:share-zip": "npm run build -w @cuedesigner/core && node packages/web/scripts/test-share-zip-roundtrip.mjs",
     "dev:web": "npm run dev -w @cuedesigner/web",
     "dev:electron": "npm run dev -w @cuedesigner/electron",
     "start:web": "npm run preview -w @cuedesigner/web",

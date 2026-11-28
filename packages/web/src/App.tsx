@@ -8,6 +8,7 @@ import {
   deleteCue,
   deleteDepartment,
   deleteCuesForDepartment,
+  buildSharePackage,
   deserializeProject,
   emptySyncStatus,
   formatAbsoluteTime,
@@ -22,6 +23,7 @@ import {
   moveCue,
   musicalRulerMarkTimes,
   nextDeptCueNumber,
+  parseSharePackage,
   parseTime,
   parseTimecode,
   placeCue,
@@ -82,6 +84,7 @@ import {
   type LtcAudioDeviceInfo,
   type MidiInputInfo,
 } from "./timecodeSync";
+import { buildZipBlob, downloadBlob, readZipEntries } from "./zipDownload";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
 /** Matches `.track` label column / ruler gutter width. */
@@ -160,6 +163,7 @@ export function App() {
   midiRouteRef.current = { inputId: midiInputId };
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
+  const sharePackageInputRef = useRef<HTMLInputElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   /** Mirrors timelineZoom for RAF follow / programmatic scroll (updated each render). */
@@ -1064,6 +1068,131 @@ export function App() {
     setStatus("New project created.");
   };
 
+  /** Portable team handoff: .cueproj.zip with project.json + media/ + README (no size cap). */
+  const onShareProject = async () => {
+    const touched = touchProject(project);
+    setProject(touched);
+    try {
+      let mediaBytes: Uint8Array | null = null;
+      const blob = mediaBlobRef.current;
+      const meta = mediaMetaRef.current;
+      if (blob) {
+        mediaBytes = new Uint8Array(await blob.arrayBuffer());
+        try {
+          await putProjectMedia(touched.id, blob, meta ?? {
+            name: touched.media?.name ?? "track",
+            mimeType:
+              touched.media?.mimeType ||
+              blob.type ||
+              "application/octet-stream",
+          });
+        } catch {
+          // IndexedDB optional for share
+        }
+      }
+
+      const packed = buildSharePackage({
+        project: touched,
+        mediaBytes,
+        mediaName: meta?.name ?? touched.media?.name,
+        mediaMimeType: meta?.mimeType ?? touched.media?.mimeType,
+      });
+      const zipBlob = buildZipBlob(packed.entries);
+      downloadBlob(packed.filename, zipBlob);
+
+      if (packed.includedMedia && blob) {
+        setStatus(
+          `Shared ${packed.filename} (${formatBytes(zipBlob.size)}, media ${formatBytes(blob.size)}). Copy via USB / Drive / Dropbox — teammate uses Open shared.`,
+        );
+      } else if (touched.media) {
+        setStatus(
+          `Shared ${packed.filename} without media bytes. Teammate must Import audio (“${touched.media.name}”) after Open shared.`,
+        );
+      } else {
+        setStatus(
+          `Shared ${packed.filename} (cues only). Offline handoff — no network used.`,
+        );
+      }
+    } catch (err) {
+      setStatus(
+        `Share failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  const onOpenSharedPackage = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      setStatus(`Opening shared package ${file.name}…`);
+      const zipEntries = await readZipEntries(file);
+      const parsed = parseSharePackage(zipEntries);
+      const loaded = parsed.project;
+
+      setSelectedCueId(null);
+      setActiveDeptId(loaded.departments[0]?.id ?? "");
+      setPlaying(false);
+      setCurrentTime(0);
+      setProject(loaded);
+
+      let restored = false;
+      let missingPrompt = false;
+
+      if (parsed.media) {
+        const src = parsed.media.bytes;
+        const ab = src.buffer.slice(
+          src.byteOffset,
+          src.byteOffset + src.byteLength,
+        ) as ArrayBuffer;
+        const mediaBlob = new Blob([ab], {
+          type: parsed.media.mimeType || "application/octet-stream",
+        });
+        await applyMediaBlob(
+          mediaBlob,
+          { name: parsed.media.name, mimeType: parsed.media.mimeType },
+          loaded.id,
+        );
+        restored = true;
+      } else if (parsed.mediaDataUrl) {
+        const mediaBlob = await dataUrlToBlob(parsed.mediaDataUrl);
+        const name = loaded.media?.name ?? "audio";
+        const mimeType =
+          loaded.media?.mimeType || mediaBlob.type || "application/octet-stream";
+        await applyMediaBlob(mediaBlob, { name, mimeType }, loaded.id);
+        restored = true;
+      } else {
+        const stored = await getProjectMedia(loaded.id).catch(() => null);
+        if (stored) {
+          await applyMediaBlob(
+            stored.blob,
+            { name: stored.name, mimeType: stored.mimeType },
+            loaded.id,
+            { persist: false },
+          );
+          restored = true;
+        } else {
+          clearPlaybackMedia();
+          if (loaded.media) missingPrompt = true;
+        }
+      }
+
+      setStatus(
+        `Opened shared show ${loaded.name} (${loaded.cues.length} cues).${
+          restored
+            ? " Audio restored from package — play/scrub ready."
+            : missingPrompt
+              ? ` Media missing (“${loaded.media!.name}”). Import audio to restore playback.`
+              : ""
+        }`,
+      );
+    } catch (err) {
+      setStatus(
+        `Open shared failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
   const placeAtPlayhead = (bypassSnap = false) => {
     if (!activeDeptId) return;
     const tAbs = applySnap(currentTime, project.settings, bypassSnap);
@@ -1267,6 +1396,20 @@ export function App() {
           <button type="button" onClick={onSaveProject}>
             Save
           </button>
+          <button
+            type="button"
+            onClick={() => void onShareProject()}
+            title="Download a portable .cueproj.zip (project + media) for USB / Drive / Dropbox handoff"
+          >
+            Share
+          </button>
+          <button
+            type="button"
+            onClick={() => sharePackageInputRef.current?.click()}
+            title="Open a teammate’s .cueproj.zip share package"
+          >
+            Open shared
+          </button>
           <button type="button" onClick={() => setExportOpen(true)}>
             Export
           </button>
@@ -1290,6 +1433,13 @@ export function App() {
             type="file"
             accept=".json,.cueproj.json,application/json"
             onChange={onOpenProject}
+          />
+          <input
+            ref={sharePackageInputRef}
+            className="file-input"
+            type="file"
+            accept=".zip,.cueproj.zip,application/zip"
+            onChange={onOpenSharedPackage}
           />
         </div>
       </header>
