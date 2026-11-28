@@ -28,7 +28,10 @@ npm run build
 npm run start -w @cuedesigner/electron
 ```
 
-This uses `packages/web/dist` via the workspace path (same as before packaging).
+`npm run build` refreshes `packages/web/dist` **and** copies it into `packages/electron/renderer/`.  
+`npm run start` re-copies the renderer again, then launches Electron.
+
+Unpackaged Electron prefers `packages/web/dist` over any leftover `renderer/` folder so a prior `package:mac` cannot serve a stale UI after you rebuild. Packaged apps still load `renderer/` from inside the app bundle.
 
 ## Package a macOS app
 

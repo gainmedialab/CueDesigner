@@ -186,6 +186,8 @@ export function App() {
   const followActive = followPlayhead && !followSuspended;
   const followActiveRef = useRef(followActive);
   followActiveRef.current = followActive;
+  /** True while the RAF clock is actively chasing scroll (play / TC lock). */
+  const followTransportActiveRef = useRef(false);
 
   const setScrollLeftProgrammatic = useCallback((left: number) => {
     const el = timelineScrollRef.current;
@@ -193,13 +195,13 @@ export function App() {
     suppressScrollFollowPauseRef.current = true;
     el.scrollLeft = left;
     setTimelineScrollLeft(el.scrollLeft);
-    // While follow owns the scrollport, keep suppress latched so deferred
+    // While RAF follow owns the scrollport, keep suppress latched so deferred
     // scroll events cannot suspend follow. Otherwise clear after a double-rAF
     // (some engines fire scroll async after assignment).
-    if (followActiveRef.current && zoomRef.current > 1) return;
+    if (followTransportActiveRef.current) return;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        if (!followActiveRef.current) {
+        if (!followTransportActiveRef.current) {
           suppressScrollFollowPauseRef.current = false;
         }
       });
@@ -426,6 +428,10 @@ export function App() {
   // effect) so we do not re-render the waveform every frame.
   useEffect(() => {
     const external = syncSource === "ltc" || syncSource === "mtc";
+    const stopFollowTransport = () => {
+      followTransportActiveRef.current = false;
+      suppressScrollFollowPauseRef.current = false;
+    };
     const tick = () => {
       const sync = syncRef.current;
       const chase = external ? sync?.sampleChase() : null;
@@ -433,6 +439,7 @@ export function App() {
         const t = chase.tAbs;
         currentTimeRef.current = t;
         setCurrentTime(t);
+        followTransportActiveRef.current = true;
         applyFollowScroll(t, durationRef.current || 0);
         const audio = audioRef.current;
         if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
@@ -449,23 +456,25 @@ export function App() {
         const t = audio.currentTime;
         currentTimeRef.current = t;
         setCurrentTime(t);
+        followTransportActiveRef.current = true;
         applyFollowScroll(t, durationRef.current || audio.duration || 0);
         rafRef.current = requestAnimationFrame(tick);
       } else if (external) {
         // Waiting for lock — keep RAF alive without advancing from file clock.
-        // Release suppress so a dropout cannot leave the scrollport latched.
-        suppressScrollFollowPauseRef.current = false;
+        stopFollowTransport();
         rafRef.current = requestAnimationFrame(tick);
+      } else {
+        stopFollowTransport();
       }
     };
     if ((!external && playing) || external) {
       rafRef.current = requestAnimationFrame(tick);
     } else {
-      // Transport stopped — release follow suppress so manual scroll works.
-      suppressScrollFollowPauseRef.current = false;
+      stopFollowTransport();
     }
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      followTransportActiveRef.current = false;
     };
   }, [playing, syncSource, applyFollowScroll]);
 
@@ -541,16 +550,25 @@ export function App() {
 
   // Keep zoom-to-cursor / zoom-around-playhead scroll anchor after layout.
   // Re-read scrollWidth here (post-commit) so the new zoom width is used.
+  // A second rAF pass covers engines that still report the pre-zoom
+  // scrollWidth during the synchronous layout effect (seen under Electron).
   useLayoutEffect(() => {
     const anchor = pendingZoomAnchorRef.current;
-    const el = timelineScrollRef.current;
-    if (!anchor || !el || !(duration > 0)) return;
+    if (!anchor || !(duration > 0)) return;
     pendingZoomAnchorRef.current = null;
-    const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
-    const laneX = (timeToLanePercent(anchor.t, duration) / 100) * laneW;
-    setScrollLeftProgrammatic(
-      Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX),
-    );
+    const applyAnchor = () => {
+      const el = timelineScrollRef.current;
+      if (!el) return;
+      const laneW = Math.max(1, el.scrollWidth - TRACK_LABEL_W);
+      const laneX = (timeToLanePercent(anchor.t, duration) / 100) * laneW;
+      setScrollLeftProgrammatic(
+        Math.max(0, laneX + TRACK_LABEL_W - anchor.cursorX),
+      );
+    };
+    applyAnchor();
+    requestAnimationFrame(() => {
+      applyAnchor();
+    });
   }, [zoom, duration, setScrollLeftProgrammatic]);
 
   // Snap once when Follow becomes active (e.g. re-check / F / Play clears

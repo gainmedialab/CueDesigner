@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "npm run build && electron .",
-    "start": "electron .",
+    "start": "node scripts/prepare-renderer.mjs && electron .",
     "prepare:renderer": "node scripts/prepare-renderer.mjs",
     "prepackage": "npm run build && npm run prepare:renderer",
     "package:mac": "node scripts/ensure-macos.mjs && npm run prepackage && electron-builder --config electron-builder.yml --mac --publish never",
