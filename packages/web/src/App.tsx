@@ -211,6 +211,20 @@ export function App() {
    */
   const [editMode, setEditMode] = useState<AppEditMode>("edit");
   const editsLocked = editMode === "show";
+  /**
+   * Shell drawers — Sync / Generate / Loop / Grid collapse by default so the
+   * transport + Next countdown stay primary. Exclusive: one open at a time.
+   */
+  const [shellDrawer, setShellDrawer] = useState<
+    null | "sync" | "generate" | "loop" | "grid"
+  >(null);
+  /** Keyboard shortcut / help popover (?). */
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpPopoverRef = useRef<HTMLDivElement | null>(null);
+  const shellDrawerRef = useRef(shellDrawer);
+  shellDrawerRef.current = shellDrawer;
+  const helpOpenRef = useRef(helpOpen);
+  helpOpenRef.current = helpOpen;
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -1102,6 +1116,31 @@ export function App() {
       }
       if (isTextEntryTarget(e.target)) return;
 
+      // Escape closes shell drawers / help popover before transport keys.
+      if (e.code === "Escape" || e.key === "Escape") {
+        if (helpOpenRef.current || shellDrawerRef.current) {
+          e.preventDefault();
+          e.stopPropagation();
+          setHelpOpen(false);
+          setShellDrawer(null);
+        }
+        return;
+      }
+
+      // ? / Shift+/ toggles shortcut help (not a transport shortcut).
+      if (
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (e.key === "?" || (e.code === "Slash" && e.shiftKey))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setHelpOpen((prev) => !prev);
+        setShellDrawer(null);
+        return;
+      }
+
       const action = matchTransportShortcut(e);
       if (!action) return;
       e.preventDefault();
@@ -1204,6 +1243,19 @@ export function App() {
       unsubDesktop?.();
     };
   }, []);
+
+  // Dismiss shortcut help when clicking outside the popover (HIG: light dismiss).
+  useEffect(() => {
+    if (!helpOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const root = helpPopoverRef.current;
+      if (!root) return;
+      if (e.target instanceof Node && root.contains(e.target)) return;
+      setHelpOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [helpOpen]);
 
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
@@ -1738,6 +1790,34 @@ export function App() {
   const loopRegionValid = isValidLoopRegion(loopA, loopB);
   const loopArmed = loopEnabled && loopRegionValid;
 
+  const toggleShellDrawer = useCallback(
+    (id: "sync" | "generate" | "loop" | "grid") => {
+      setShellDrawer((prev) => (prev === id ? null : id));
+      setHelpOpen(false);
+    },
+    [],
+  );
+
+  const syncChipLabel =
+    syncSource === "internal"
+      ? "Internal"
+      : syncStatus.lock === "locked"
+        ? "Locked"
+        : syncStatus.lock === "freewheel"
+          ? "Freewheel"
+          : syncStatus.lock === "locking"
+            ? "Locking"
+            : "Unlocked";
+
+  const generateChipLabel =
+    generateFlavour === "mtc"
+      ? "MTC stub"
+      : generateStatus.emitting
+        ? "Generating"
+        : generateArmed
+          ? "Armed"
+          : "Disarmed";
+
   const commitInspectorTime = () => {
     if (inspectorTimeDraft == null || !selectedCueId) {
       setInspectorTimeDraft(null);
@@ -1895,7 +1975,9 @@ export function App() {
         </div>
       ) : null}
 
+      <div className="chrome">
       <div className="transport">
+        <div className="transport-primary" aria-label="Transport and next cue">
         <button
           type="button"
           className="primary"
@@ -1957,7 +2039,7 @@ export function App() {
           }
           onChange={(e) => seek(Number(e.target.value))}
         />
-        <span className="clock" style={{ color: "var(--text-muted)", fontSize: "0.95rem" }}>
+        <span className="clock clock-end">
           {clockEnd}
         </span>
         <div
@@ -2014,6 +2096,7 @@ export function App() {
         </div>
         <button
           type="button"
+          className="cue-at-playhead"
           onClick={(e) => placeAtPlayhead(e.altKey)}
           disabled={
             editsLocked || (placeDeptIds.length === 0 && !activeDeptId)
@@ -2026,11 +2109,156 @@ export function App() {
                 : "Place cue at playhead (N). Hold Alt for free placement (Alt+N). Check departments to place on several at once."
           }
         >
-          Cue at playhead
+          Cue
           {placeDeptIds.length > 1 ? ` ×${placeDeptIds.length}` : ""}{" "}
           <kbd>N</kbd>
         </button>
-        <div className="sync-block" aria-label="Timecode sync source">
+        </div>
+        <div className="shell-toggles" aria-label="Secondary panels">
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "sync" ? " open" : ""}${
+              syncSource !== "internal" ? " active-sync" : ""
+            }`}
+            aria-expanded={shellDrawer === "sync"}
+            aria-controls="shell-drawer-sync"
+            title="Timecode sync source (Internal / LTC / MTC)"
+            onClick={() => toggleShellDrawer("sync")}
+          >
+            <span
+              className={`shell-toggle-led sync-lock-${syncStatus.lock}`}
+              aria-hidden
+            >
+              <span className="sync-lock-dot" />
+            </span>
+            Sync
+            <span className="shell-toggle-meta">{syncChipLabel}</span>
+          </button>
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "generate" ? " open" : ""}${
+              generateArmed ? " active-gen" : ""
+            }`}
+            aria-expanded={shellDrawer === "generate"}
+            aria-controls="shell-drawer-generate"
+            title="Outgoing LTC generate (independent of Sync chase)"
+            onClick={() => toggleShellDrawer("generate")}
+          >
+            <span
+              className={`shell-toggle-led${
+                generateStatus.emitting
+                  ? " generate-emitting"
+                  : generateArmed
+                    ? " generate-armed"
+                    : ""
+              }`}
+              aria-hidden
+            >
+              <span className="sync-lock-dot" />
+            </span>
+            Gen
+            <span className="shell-toggle-meta">{generateChipLabel}</span>
+          </button>
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "loop" ? " open" : ""}${
+              loopArmed ? " active-loop" : ""
+            }`}
+            aria-expanded={shellDrawer === "loop"}
+            aria-controls="shell-drawer-loop"
+            title="Rehearsal loop (I / O / L)"
+            onClick={() => toggleShellDrawer("loop")}
+          >
+            Loop
+            <span className="shell-toggle-meta">
+              {loopArmed ? "On" : loopA != null || loopB != null ? "Set" : "Off"}
+            </span>
+          </button>
+          <button
+            type="button"
+            className={`shell-toggle${shellDrawer === "grid" ? " open" : ""}`}
+            aria-expanded={shellDrawer === "grid"}
+            aria-controls="shell-drawer-grid"
+            title="BPM, grid, Click, zoom, Follow"
+            onClick={() => toggleShellDrawer("grid")}
+          >
+            Grid
+            <span className="shell-toggle-meta">
+              {project.settings.bpm} · {zoomLabel}
+            </span>
+          </button>
+          <div className="help-wrap" ref={helpPopoverRef}>
+            <button
+              type="button"
+              className={`shell-toggle help-toggle${helpOpen ? " open" : ""}`}
+              aria-expanded={helpOpen}
+              aria-controls="shell-help-popover"
+              title="Keyboard shortcuts (?)"
+              onClick={() => {
+                setHelpOpen((prev) => !prev);
+                setShellDrawer(null);
+              }}
+            >
+              ?
+            </button>
+            {helpOpen ? (
+              <div
+                id="shell-help-popover"
+                className="help-popover"
+                role="dialog"
+                aria-label="Keyboard shortcuts"
+              >
+                <div className="help-popover-title">Shortcuts</div>
+                <ul className="help-list">
+                  <li>
+                    <kbd>Space</kbd> Play / pause (Internal Sync)
+                  </li>
+                  <li>
+                    <kbd>F</kbd> Follow playhead
+                  </li>
+                  <li>
+                    <kbd>G</kbd> / <kbd>H</kbd> Zoom out / in
+                  </li>
+                  <li>
+                    <kbd>S</kbd> Magnetic snap
+                  </li>
+                  <li>
+                    <kbd>J</kbd> Home (start)
+                  </li>
+                  <li>
+                    <kbd>C</kbd> Click metronome
+                  </li>
+                  <li>
+                    <kbd>N</kbd> Cue at playhead · <kbd>Alt</kbd>+
+                    <kbd>N</kbd> free
+                  </li>
+                  <li>
+                    <kbd>I</kbd> / <kbd>O</kbd> Loop In / Out · <kbd>L</kbd>{" "}
+                    arm loop
+                  </li>
+                  <li>
+                    <kbd>?</kbd> This help · <kbd>Esc</kbd> close panels
+                  </li>
+                  <li>
+                    Hold <kbd>Alt</kbd> while placing / dragging to bypass snap
+                  </li>
+                  <li>
+                    <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor
+                  </li>
+                  <li>⌘/Ctrl-click multi-select cues</li>
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {shellDrawer === "sync" ? (
+        <div
+          id="shell-drawer-sync"
+          className="shell-drawer sync-block"
+          aria-label="Timecode sync source"
+        >
           <label className="sync-source-field">
             Sync
             <select
@@ -2207,8 +2435,12 @@ export function App() {
             ) : null}
           </span>
         </div>
+      ) : null}
+
+      {shellDrawer === "generate" ? (
         <div
-          className="sync-block generate-block"
+          id="shell-drawer-generate"
+          className="shell-drawer sync-block generate-block"
           aria-label="Outgoing timecode generate"
         >
           <label className="sync-source-field">
@@ -2388,9 +2620,14 @@ export function App() {
             LTC ≠ FOH
           </span>
         </div>
-      </div>
+      ) : null}
 
-      <div className="rehearsal-bar" aria-label="Rehearsal loop">
+      {shellDrawer === "loop" ? (
+      <div
+        id="shell-drawer-loop"
+        className="shell-drawer rehearsal-bar"
+        aria-label="Rehearsal loop"
+      >
         <span className="rehearsal-title">Loop</span>
         <div
           className="mode-switch"
@@ -2493,8 +2730,14 @@ export function App() {
                 : "Set In / Out, then arm Loop"}
         </span>
       </div>
+      ) : null}
 
-      <div className="grid-bar" aria-label="BPM and snap settings">
+      {shellDrawer === "grid" ? (
+      <div
+        id="shell-drawer-grid"
+        className="shell-drawer grid-bar"
+        aria-label="BPM and snap settings"
+      >
         <label className="grid-field bpm-field">
           BPM
           <input
@@ -2795,15 +3038,8 @@ export function App() {
             </span>
           ) : null}
         </label>
-        <span className="grid-hint">
-          Hold <kbd>Alt</kbd> while placing or dragging to bypass snap ·{" "}
-          <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
-          <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
-          <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
-          <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click ·{" "}
-          <kbd>N</kbd> cue at playhead (checked depts) · <kbd>I</kbd>/<kbd>O</kbd>{" "}
-          loop In/Out · <kbd>L</kbd> loop · ⌘/Ctrl-click multi-select cues
-        </span>
+      </div>
+      ) : null}
       </div>
 
       <div className="workspace">

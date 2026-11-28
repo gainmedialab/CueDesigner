@@ -75,9 +75,13 @@ npm run typecheck
 - **Multi-dept:** Check **Place on** departments then **N** / Cue at playhead creates one cue per checked dept; **Copy to…** duplicates selected cue(s) onto other departments (same time, new per-dept numbers)
 - **Shell:** Electron loads the same web UI / schema on macOS
 
+## Shell chrome (transport hierarchy)
+
+The default Edit / Show Mode shell keeps **Play · clock · scrub · Next countdown · Cue at playhead** on the primary transport row. Secondary controls use progressive disclosure (macOS HIG–aligned) via trailing chips — **Sync**, **Gen**, **Loop**, **Grid** — each opening one exclusive drawer. Armed / locked / generating states stay visible on the chips when drawers are closed. Keyboard shortcuts live in a **?** help popover (also **?** / Shift+/); **Esc** dismisses drawers and help. Intended for desktop / Electron at ~1280px+; not a mobile layout pass.
+
 ## BPM + magnetic snap (Phase 1)
 
-Use the **BPM bar** under transport:
+Open the **Grid** drawer from the transport trailing chips:
 
 | Control | What it does |
 |---------|----------------|
@@ -93,7 +97,7 @@ Use the **BPM bar** under transport:
 
 **Bypass:** hold **Alt** (Option on macOS) while placing a cue or dragging to keep free timing. Timeline shows a visible grid. Settings persist in `.cueproj.json` under `project.settings` (`bpm`, `timeSignature`, `downbeatOffsetSec`, `gridResolution`, `snapEnabled`, `timelineZoom`, `metronomeEnabled`, `metronomeVolume`, `fps`, `showTcOffsetSec`).
 
-**Keyboard shortcuts** (ignored while typing in inputs; no Ctrl/⌘/Alt chords):
+**Keyboard shortcuts** (ignored while typing in inputs; no Ctrl/⌘/Alt chords). Open **?** in the transport row for the same list:
 
 | Key | Action |
 |-----|--------|
@@ -108,11 +112,13 @@ Use the **BPM bar** under transport:
 | **I** | Set rehearsal loop **In (A)** at playhead |
 | **O** | Set rehearsal loop **Out (B)** at playhead |
 | **L** | Toggle rehearsal loop arm (wrap B→A while playing) |
+| **?** | Toggle shortcut help popover |
+| **Esc** | Close shell drawers / help popover |
 | ⌘/Ctrl-click | Multi-select cues (for **Copy to…** / multi-delete) |
 
 ## Rehearsal loop + countdown (Phase 1)
 
-**Loop** bar under transport (Internal Sync only — LTC/MTC chase does not wrap file audio):
+**Loop** drawer from the transport trailing chips (Internal Sync only — LTC/MTC chase does not wrap file audio):
 
 | Control | What it does |
 |---------|----------------|
@@ -145,7 +151,7 @@ Canonical storage remains **file-relative absolute seconds** (`cue.tAbs`). Editi
 
 ## Live timecode sync (LTC / MTC chase)
 
-Transport **Sync** selects the show clock source:
+Open the **Sync** drawer (trailing chip shows lock state when collapsed). **Sync** selects the show clock source:
 
 | Source | Path | Notes |
 |--------|------|--------|
@@ -163,7 +169,7 @@ No native Electron MIDI addon in this slice — Chromium Web MIDI + Web Audio co
 
 ### Generate (outgoing TC)
 
-**Generate** is independent of Sync chase (arm/disarm does not tear down LTC/MTC input).
+Open the **Gen** drawer (chip shows Disarmed / Armed / Generating). **Generate** is independent of Sync chase (arm/disarm does not tear down LTC/MTC input).
 
 | Flavour | Path | Notes |
 |---------|------|--------|
