@@ -102,6 +102,7 @@ Use the **BPM bar** under transport:
 | **H** | Zoom in around playhead (same as +) |
 | **S** | Toggle Magnetic snap |
 | **J** | Home — seek playhead to start (same as transport ⇤) |
+| **C** | Toggle Click metronome (auditions a tick when turning on) |
 
 **Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider / **G**/**H** zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). During Internal playback or LTC/MTC chase the timeline **follows the playhead** when **Follow** is on (playhead kept ~35% into the visible lane). The checkbox latches across play/pause; manual scroll temporarily suspends follow (checkbox stays on; **Play** or re-check clears suspension). The waveform redraws for the visible span at device-pixel density, keyed to the same file-relative `tAbs` as the playhead, cues, and grid. Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 

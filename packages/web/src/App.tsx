@@ -126,7 +126,7 @@ export function App() {
   const [followPlayhead, setFollowPlayhead] = useState(true);
   /** Temporary pause after manual scroll; cleared on Play or re-checking Follow. */
   const [followSuspended, setFollowSuspended] = useState(false);
-  /** Export dialog open — suspends Space/F/G/H/S/J while open; transport/Click unchanged. */
+  /** Export dialog open — suspends Space/F/G/H/S/J/C while open; transport/Click unchanged. */
   const [exportOpen, setExportOpen] = useState(false);
   /** Session clock source — Internal keeps HTMLMediaElement transport untouched. */
   const [syncSource, setSyncSource] = useState<SyncClockSource>("internal");
@@ -707,9 +707,11 @@ export function App() {
   exportOpenRef.current = exportOpen;
   const chaseOnlyRef = useRef(chaseOnly);
   chaseOnlyRef.current = chaseOnly;
+  const metronomeEnabledRef = useRef(project.settings.metronomeEnabled);
+  metronomeEnabledRef.current = project.settings.metronomeEnabled;
 
-  // Space / F / G / H / S / J — transport / grid-bar / zoom paths.
-  // Does not touch Click scheduling, MES, or lockToMediaClock.
+  // Space / F / G / H / S / J / C — transport / grid-bar / zoom / Click paths.
+  // Does not touch MES or lockToMediaClock; C only toggles enable + audition.
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
     const isTextEntryTarget = (el: EventTarget | null): boolean => {
@@ -822,6 +824,17 @@ export function App() {
         e.stopPropagation();
         if (chaseOnlyRef.current) return;
         seekRef.current(0);
+        return;
+      }
+      if (code === "KeyC") {
+        // Toggle Click — same as checkbox; audition unlocks Web Audio on enable.
+        e.preventDefault();
+        e.stopPropagation();
+        const on = !metronomeEnabledRef.current;
+        if (on) metronomeRef.current?.auditionSync();
+        setProject((p) =>
+          updateSettings(p, { metronomeEnabled: on }),
+        );
       }
     };
 
@@ -1663,7 +1676,7 @@ export function App() {
                 updateSettings(p, { metronomeEnabled: on }),
               );
             }}
-            title="Click on the BPM beat grid while playing (accent on downbeat)"
+            title="Click on the BPM beat grid while playing (accent on downbeat). Shortcut: C"
           />
           Click
         </label>
@@ -1757,7 +1770,7 @@ export function App() {
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
           <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
           <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
-          <kbd>S</kbd> snap · <kbd>J</kbd> home
+          <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click
         </span>
       </div>
 
