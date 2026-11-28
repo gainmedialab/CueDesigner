@@ -60,10 +60,12 @@ import {
 import {
   Metronome,
   drawWaveform,
+  estimateDownbeatOffsetSec,
   loadAudioFile,
   loadWaveformData,
   type WaveformData,
 } from "./audio";
+import { matchTransportShortcut } from "./shortcuts";
 import {
   MEDIA_EMBED_MAX_BYTES,
   blobToDataUrl,
@@ -125,7 +127,7 @@ export function App() {
   const [followPlayhead, setFollowPlayhead] = useState(true);
   /** Temporary pause after manual scroll; cleared on Play or re-checking Follow. */
   const [followSuspended, setFollowSuspended] = useState(false);
-  /** Export dialog open — suspends Space/F/G/H/S/J while open; transport/Click unchanged. */
+  /** Export dialog open — suspends Space/F/G/H/S/J/C/N while open; transport/Click unchanged. */
   const [exportOpen, setExportOpen] = useState(false);
   /** Session clock source — Internal keeps HTMLMediaElement transport untouched. */
   const [syncSource, setSyncSource] = useState<SyncClockSource>("internal");
@@ -385,6 +387,20 @@ export function App() {
     project.settings.metronomeEnabled,
     project.settings.metronomeVolume,
   ]);
+
+  // Auto-Downbeat from first strong onset when still at 0 (pickup files).
+  useEffect(() => {
+    if (!waveform) return;
+    if (project.settings.downbeatOffsetSec > 0) return;
+    const est = estimateDownbeatOffsetSec(waveform, {
+      bpm: project.settings.bpm,
+    });
+    if (!(est > 0)) return;
+    setProject((p) => {
+      if (p.settings.downbeatOffsetSec > 0) return p;
+      return updateSettings(p, { downbeatOffsetSec: est });
+    });
+  }, [waveform, project.settings.bpm, project.settings.downbeatOffsetSec]);
 
   useEffect(() => {
     metronomeRef.current?.setPlaying(playing);
@@ -671,8 +687,9 @@ export function App() {
       try {
         // Start media immediately (native element). Click AudioContext resume
         // is non-blocking — never await click priming before audio.play().
-        const playP = audio.play();
+        // primeFromGesture runs inside resume() under this user gesture stack.
         void metronomeRef.current?.resume();
+        const playP = audio.play();
         await playP;
         setPlaying(true);
       } catch (err) {
@@ -691,9 +708,39 @@ export function App() {
   exportOpenRef.current = exportOpen;
   const chaseOnlyRef = useRef(chaseOnly);
   chaseOnlyRef.current = chaseOnly;
+  const metronomeEnabledRef = useRef(project.settings.metronomeEnabled);
+  metronomeEnabledRef.current = project.settings.metronomeEnabled;
+  /** Dedupe DOM keydown + Electron IPC/CustomEvent for the same physical key. */
+  const lastClickShortcutMsRef = useRef(0);
+  const lastPlaceCueShortcutMsRef = useRef(0);
+  const placeAtPlayheadRef = useRef<(bypassSnap?: boolean) => void>(() => undefined);
 
-  // Space / F / G / H / S / J — transport / grid-bar / zoom paths.
-  // Does not touch Click scheduling, MES, or lockToMediaClock.
+  const toggleClickFromShortcut = useCallback(() => {
+    const now = performance.now();
+    if (now - lastClickShortcutMsRef.current < 80) return;
+    lastClickShortcutMsRef.current = now;
+    const on = !metronomeEnabledRef.current;
+    if (on) metronomeRef.current?.auditionSync();
+    setProject((p) => updateSettings(p, { metronomeEnabled: on }));
+    setStatus(on ? "Click on (C)" : "Click off (C)");
+  }, []);
+
+  const toggleClickFromShortcutRef = useRef(toggleClickFromShortcut);
+  toggleClickFromShortcutRef.current = toggleClickFromShortcut;
+
+  const placeCueFromShortcut = useCallback((bypassSnap = false) => {
+    const now = performance.now();
+    if (now - lastPlaceCueShortcutMsRef.current < 80) return;
+    lastPlaceCueShortcutMsRef.current = now;
+    placeAtPlayheadRef.current(bypassSnap);
+  }, []);
+
+  const placeCueFromShortcutRef = useRef(placeCueFromShortcut);
+  placeCueFromShortcutRef.current = placeCueFromShortcut;
+
+  // Space / F / G / H / S / J / C / N — transport / grid / Click / place-cue.
+  // Does not touch MES or lockToMediaClock.
+  // Electron also nudges C/N via preload IPC (macOS menu can drop bare keydown).
   useEffect(() => {
     /** Only block when the user is typing — not range/checkbox/button focus. */
     const isTextEntryTarget = (el: EventTarget | null): boolean => {
@@ -743,11 +790,9 @@ export function App() {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.repeat) return;
       // Suspend transport shortcuts while Export dialog is open (Escape closes).
       if (exportOpenRef.current) {
-        if (e.code === "Escape") {
+        if (e.code === "Escape" || e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
           setExportOpen(false);
@@ -756,20 +801,19 @@ export function App() {
       }
       if (isTextEntryTarget(e.target)) return;
 
-      // Prefer e.code so layout / modifiers don't break letter matching.
-      const code = e.code;
-      if (code === "Space") {
+      const action = matchTransportShortcut(e);
+      if (!action) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (action === "play") {
         // preventDefault stops focused <button> from also synthesizing click
         // (double toggle → Space looks dead). Chase-only Sync ignores Space.
-        e.preventDefault();
-        e.stopPropagation();
         if (chaseOnlyRef.current) return;
         void togglePlayRef.current();
         return;
       }
-      if (code === "KeyF") {
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "follow") {
         setFollowPlayhead((prev) => {
           const next = !prev;
           if (next) setFollowSuspended(false);
@@ -777,41 +821,68 @@ export function App() {
         });
         return;
       }
-      if (code === "KeyG") {
-        // Zoom out around playhead — same as − button.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "zoomOut") {
         zoomAroundPlayheadRef.current(zoomRef.current / ZOOM_STEP);
         return;
       }
-      if (code === "KeyH") {
-        // Zoom in around playhead — same as + button.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "zoomIn") {
         zoomAroundPlayheadRef.current(zoomRef.current * ZOOM_STEP);
         return;
       }
-      if (code === "KeyS") {
-        // Magnetic snap toggle — same as checkbox.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "snap") {
         setProject((p) =>
           updateSettings(p, { snapEnabled: !p.settings.snapEnabled }),
         );
         return;
       }
-      if (code === "KeyJ") {
-        // Home — seek to start (same as transport ⇤). Chase-only: no file seek.
-        e.preventDefault();
-        e.stopPropagation();
+      if (action === "home") {
         if (chaseOnlyRef.current) return;
         seekRef.current(0);
+        return;
       }
+      if (action === "click") {
+        toggleClickFromShortcutRef.current();
+        return;
+      }
+      if (action === "placeCue") {
+        placeCueFromShortcutRef.current(e.altKey);
+      }
+    };
+
+    const runDesktopAction = (action: string) => {
+      if (exportOpenRef.current) return;
+      if (isTextEntryTarget(document.activeElement)) return;
+      if (action === "toggle-click") {
+        toggleClickFromShortcutRef.current();
+        return;
+      }
+      if (action === "place-cue") {
+        placeCueFromShortcutRef.current(false);
+        return;
+      }
+      if (action === "place-cue-free") {
+        placeCueFromShortcutRef.current(true);
+      }
+    };
+
+    const onDesktopShortcut = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ action?: string }>).detail;
+      if (detail?.action) runDesktopAction(detail.action);
     };
 
     // Capture on document so we see keys even when focus is on controls.
     document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
+    // Electron bare-key bridge (IPC + CustomEvent); deduped with DOM keydown.
+    window.addEventListener("cuedesigner-shortcut", onDesktopShortcut);
+    const unsubDesktop = window.cueDesktop?.onShortcut((action) => {
+      runDesktopAction(action);
+    });
+
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("cuedesigner-shortcut", onDesktopShortcut);
+      unsubDesktop?.();
+    };
   }, []);
 
   const clearPlaybackMedia = useCallback(() => {
@@ -1013,6 +1084,7 @@ export function App() {
       }`,
     );
   };
+  placeAtPlayheadRef.current = placeAtPlayhead;
 
   const onLanePointer = (e: ReactPointerEvent<HTMLDivElement>, deptId: string) => {
     const lane = e.currentTarget;
@@ -1291,9 +1363,9 @@ export function App() {
           type="button"
           onClick={(e) => placeAtPlayhead(e.altKey)}
           disabled={!activeDeptId}
-          title="Place cue at playhead (hold Alt for free placement)"
+          title="Place cue at playhead (N). Hold Alt for free placement (Alt+N)."
         >
-          Cue at playhead
+          Cue at playhead <kbd>N</kbd>
         </button>
         <div className="sync-block" aria-label="Timecode sync source">
           <label className="sync-source-field">
@@ -1638,15 +1710,20 @@ export function App() {
         <label className="grid-field checkbox">
           <input
             type="checkbox"
+            data-testid="metronome-click"
             checked={project.settings.metronomeEnabled}
-            onChange={(e) =>
+            onChange={(e) => {
+              const on = e.target.checked;
+              // Unlock Web Audio under this gesture + audition so Click is audible.
+              if (on) metronomeRef.current?.auditionSync();
               setProject((p) =>
-                updateSettings(p, { metronomeEnabled: e.target.checked }),
-              )
-            }
-            title="Click on the BPM beat grid while playing (accent on downbeat)"
+                updateSettings(p, { metronomeEnabled: on }),
+              );
+              setStatus(on ? "Click on" : "Click off");
+            }}
+            title="Click on the BPM beat grid while playing (accent on downbeat). Shortcut: C"
           />
-          Click
+          Click <kbd>C</kbd>
         </label>
         <label className="grid-field click-vol-field">
           Vol
@@ -1738,7 +1815,8 @@ export function App() {
           <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+wheel zooms to cursor ·{" "}
           <kbd>Space</kbd> play/pause (Internal Sync) · <kbd>F</kbd> follow ·{" "}
           <kbd>G</kbd> zoom out · <kbd>H</kbd> zoom in ·{" "}
-          <kbd>S</kbd> snap · <kbd>J</kbd> home
+          <kbd>S</kbd> snap · <kbd>J</kbd> home · <kbd>C</kbd> click ·{" "}
+          <kbd>N</kbd> cue at playhead
         </span>
       </div>
 

@@ -362,7 +362,10 @@ input[type="color"] {
   margin-left: auto;
 }
 
-.grid-hint kbd {
+.grid-field.checkbox kbd,
+.grid-hint kbd,
+.toolbar kbd,
+button kbd {
   font-family: var(--mono);
   font-size: 0.7rem;
   border: 1px solid var(--border);

@@ -85,7 +85,7 @@ Use the **BPM bar** under transport:
 | **Downbeat** | Offset of bar 1 beat 1 from file start (seconds); shared by snap, grid, musical time, and click |
 | **Snap** | Grid resolution: Bar, Beat, 1/4, 1/8, 1/16, 1/32 |
 | **Magnetic snap** | When on, place/drag snaps to the grid |
-| **Click** | Metronome on the beat grid while playing (downbeat accent); **Vol** sets level |
+| **Click** | Web Audio metronome on the beat grid while playing (downbeat accent); **Vol** sets level. Enabling Click auditions a tick and unlocks the click context (does not route media through MediaElementSource) |
 | **FPS** | Project frame rate for show TC: 23.976, 24, 25, 29.97 DF, 29.97 NDF, 30 |
 | **TC offset** | Show timecode at file start (`HH:MM:SS:FF` / `;FF` for DF) |
 | **Zoom** | Timeline horizontal zoom (`−` / slider / `+`); denser ruler + waveform peaks when zoomed |
@@ -102,6 +102,8 @@ Use the **BPM bar** under transport:
 | **H** | Zoom in around playhead (same as +) |
 | **S** | Toggle Magnetic snap |
 | **J** | Home — seek playhead to start (same as transport ⇤) |
+| **C** | Toggle Click metronome (auditions a tick when turning on) |
+| **N** | Place cue at playhead (same as **Cue at playhead**; **Alt+N** = free / unsnapped) |
 
 **Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider / **G**/**H** zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). During Internal playback or LTC/MTC chase the timeline **follows the playhead** when **Follow** is on (playhead kept ~35% into the visible lane). The checkbox latches across play/pause; manual scroll temporarily suspends follow (checkbox stays on; **Play** or re-check clears suspension). The waveform redraws for the visible span at device-pixel density, keyed to the same file-relative `tAbs` as the playhead, cues, and grid. Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 

@@ -210,18 +210,100 @@ export interface MetronomeGrid {
   downbeatOffsetSec: number;
 }
 
+/** Deterministic mono click PCM (peak-normalized). Short = low CPU. */
+function synthesizeClickPcm(
+  sampleRate: number,
+  freqHz: number,
+  peak: number,
+  durSec = 0.036,
+): Float32Array {
+  const n = Math.max(1, Math.floor(sampleRate * durSec));
+  const pcm = new Float32Array(n);
+  let maxAbs = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate;
+    const env = Math.exp(-t * 70);
+    const tone =
+      Math.sin(2 * Math.PI * freqHz * t) * 0.85 +
+      Math.sin(2 * Math.PI * freqHz * 2 * t) * 0.15;
+    // Tiny transient noise for perceived attack (deterministic LCG).
+    const noise =
+      i < sampleRate * 0.0015
+        ? (((i * 1103515245 + 12345) & 0xffff) / 0xffff) * 0.5 - 0.25
+        : 0;
+    const s = (tone + noise) * env;
+    pcm[i] = s;
+    const a = Math.abs(s);
+    if (a > maxAbs) maxAbs = a;
+  }
+  const scale = maxAbs > 1e-6 ? peak / maxAbs : 0;
+  for (let i = 0; i < n; i++) {
+    pcm[i] = Math.max(-1, Math.min(1, (pcm[i] ?? 0) * scale));
+  }
+  return pcm;
+}
+
+/**
+ * Estimate file-relative downbeat from the first strong onset in the PCM.
+ * Returns 0 when the first hit is already near t=0 (no silent pickup).
+ */
+export function estimateDownbeatOffsetSec(
+  wave: WaveformData,
+  opts?: { maxSearchSec?: number; bpm?: number },
+): number {
+  const { channel, sampleRate } = wave;
+  if (!channel.length || !(sampleRate > 0)) return 0;
+  const maxSearchSec = opts?.maxSearchSec ?? 2.5;
+  const bpm = opts?.bpm && opts.bpm > 0 ? opts.bpm : 120;
+  // Search at most ~2 bars so we don't latch onto a mid-phrase hit.
+  const searchSec = Math.min(maxSearchSec, (60 / bpm) * 8);
+  const n = Math.min(channel.length, Math.floor(searchSec * sampleRate));
+  if (n < sampleRate * 0.02) return 0;
+
+  const win = Math.max(1, Math.floor(sampleRate * 0.004));
+  let globalMax = 0;
+  for (let i = 0; i < n; i++) {
+    const a = Math.abs(channel[i]!);
+    if (a > globalMax) globalMax = a;
+  }
+  if (!(globalMax > 1e-4)) return 0;
+  const thresh = globalMax * 0.35;
+
+  for (let i = 0; i + win < n; i += win) {
+    let peak = 0;
+    for (let j = i; j < i + win; j++) {
+      const a = Math.abs(channel[j]!);
+      if (a > peak) peak = a;
+    }
+    if (peak >= thresh) {
+      const t = i / sampleRate;
+      return t < 0.02 ? 0 : Math.round(t * 1000) / 1000;
+    }
+  }
+  return 0;
+}
+
 /**
  * Schedules short clicks on the musical beat grid while media plays.
  * Accent on bar downbeats. Times use the same origin as snap/grid (`downbeatOffsetSec`).
  *
- * Baseline (pre-shortcut restore): media stays on native HTMLMediaElement
- * (no MediaElementSource). Clicks use a dedicated AudioContext + oscillators.
- * Look-ahead scheduling from live `audio.currentTime` — no lock-on-play,
- * no HTMLAudio click pool, no await-gated media start.
+ * Architecture (audible + smooth transport):
+ * - Media stays on native HTMLMediaElement (never MediaElementSource).
+ * - Clicks: dedicated AudioContext + peak-normalized AudioBufferSourceNode
+ *   look-ahead schedule from live `audio.currentTime`.
+ * - No HTMLAudioElement per tick (that path hitch the playhead/timer).
+ * - `resume()` / `auditionSync()` must not gate or await-before media.play().
+ *
+ * Ear sync: heard media lags `currentTime`/playhead; Web Audio BufferSource
+ * start latency is ~0, so schedule clicks `mediaEarLagSec` later than the
+ * media beat time so the *heard* tick meets the *heard* beat.
  */
 export class Metronome {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private bufHigh: AudioBuffer | null = null;
+  private bufLow: AudioBuffer | null = null;
+  private pendingSources: AudioBufferSourceNode[] = [];
   private timer: number | null = null;
   private nextBeatIndex = 0;
   private enabled = false;
@@ -233,13 +315,27 @@ export class Metronome {
     downbeatOffsetSec: 0,
   };
   private getMediaTime: () => number = () => 0;
-  private pendingOsc: OscillatorNode[] = [];
-  private readonly scheduleHorizonSec = 0.3;
+  private readonly scheduleHorizonSec = 0.28;
+  /**
+   * How far heard media lags `currentTime`/playhead. Web Audio click start
+   * is near sample-accurate, so we delay the tick by this amount.
+   */
+  private readonly mediaEarLagSec = 0.035;
+  /** Allow scheduling a beat slightly past mediaNow (Play starts mid-beat). */
+  private readonly lateGraceSec = 0.012;
+  /** Diagnostics: BufferSource starts. */
+  clicksStarted = 0;
 
   setEnabled(on: boolean): void {
+    const was = this.enabled;
     this.enabled = on;
-    if (!on) this.stopScheduler();
-    else if (this.playing) this.startScheduler();
+    if (!on) {
+      this.stopScheduler();
+      return;
+    }
+    if (this.playing && (!was || this.timer == null)) {
+      this.startScheduler();
+    }
   }
 
   setVolume(v: number): void {
@@ -270,20 +366,45 @@ export class Metronome {
     // intentionally unused
   }
 
-  /** Call when transport play/pause changes. */
+  /** Call when transport play/pause changes. Does not touch media. */
   setPlaying(playing: boolean): void {
     this.playing = playing;
     if (playing) {
-      void this.ensureCtx();
+      // Non-blocking context prime — never await before media.play().
+      this.primeFromGesture();
       if (this.enabled) this.startScheduler();
     } else {
       this.stopScheduler();
     }
   }
 
-  /** Resume the click AudioContext under a user gesture (does not gate media). */
+  /**
+   * Under Play / Click gesture: create + kick resume on the click AudioContext.
+   * Must not delay or gate media.play() (App calls this with void).
+   */
   async resume(): Promise<void> {
-    await this.ensureCtx();
+    this.primeFromGesture();
+    const ctx = this.ctx;
+    if (ctx && ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch {
+        // ignore — clicks may stay silent; transport must stay smooth
+      }
+    }
+  }
+
+  /**
+   * Fire one Web Audio click under the current user gesture (no await).
+   * Also primes the AudioContext so later look-ahead ticks are audible.
+   * Never uses HTMLAudioElement (avoids playhead hitch).
+   */
+  auditionSync(): void {
+    this.primeFromGesture();
+    const ctx = this.ctx;
+    if (!ctx || !this.bufHigh || !this.master) return;
+    const when = ctx.currentTime;
+    this.scheduleBufferClick(when, true, Math.max(0.85, this.volume));
   }
 
   /** Call after seeks so clicks re-lock to media time. */
@@ -292,7 +413,7 @@ export class Metronome {
     this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
   }
 
-  /** Alias used by later call sites. */
+  /** Alias kept for seek call sites; do not call on Play. */
   lockToMediaClock(): void {
     this.resync();
   }
@@ -303,7 +424,20 @@ export class Metronome {
     const ctx = this.ctx;
     this.ctx = null;
     this.master = null;
+    this.bufHigh = null;
+    this.bufLow = null;
     if (ctx) void ctx.close();
+  }
+
+  /**
+   * Sync create + fire-and-forget resume under a user gesture.
+   * Creating the context outside the gesture stack left it suspended (silent).
+   */
+  private primeFromGesture(): void {
+    const ctx = this.getOrCreateCtx();
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => undefined);
+    }
   }
 
   private getOrCreateCtx(): AudioContext {
@@ -316,16 +450,18 @@ export class Metronome {
       this.master = this.ctx.createGain();
       this.master.gain.value = this.volume;
       this.master.connect(this.ctx.destination);
+      this.bufHigh = this.makeBuffer(1600, 1);
+      this.bufLow = this.makeBuffer(1000, 0.9);
     }
     return this.ctx;
   }
 
-  private async ensureCtx(): Promise<AudioContext> {
-    const ctx = this.getOrCreateCtx();
-    if (ctx.state === "suspended") {
-      await ctx.resume();
-    }
-    return ctx;
+  private makeBuffer(freqHz: number, peak: number): AudioBuffer {
+    const ctx = this.ctx!;
+    const pcm = synthesizeClickPcm(ctx.sampleRate, freqHz, peak);
+    const buf = ctx.createBuffer(1, pcm.length, ctx.sampleRate);
+    buf.getChannelData(0).set(pcm);
+    return buf;
   }
 
   private beatDurationSec(): number {
@@ -340,21 +476,25 @@ export class Metronome {
     return n > 0 ? n : 4;
   }
 
+  /** First beat index still eligible to schedule at media time tAbs. */
   private beatIndexAt(tAbs: number): number {
     const beatSec = this.beatDurationSec();
     if (!(beatSec > 0)) return 0;
     const origin = this.grid.downbeatOffsetSec || 0;
-    return Math.ceil((tAbs - origin) / beatSec - 1e-9);
+    // Grace + ear-lag: Play a few ms past a beat must still arm that beat
+    // when its heard time is still ahead.
+    const skew = this.lateGraceSec + this.mediaEarLagSec;
+    return Math.ceil((tAbs - origin - skew) / beatSec - 1e-9);
   }
 
   private startScheduler(): void {
     this.stopScheduler();
-    void this.ensureCtx().then(() => {
-      if (!this.playing || !this.enabled || !this.ctx) return;
-      this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
-      this.timer = window.setInterval(() => this.tick(), 25);
-      this.tick();
-    });
+    if (!this.playing || !this.enabled) return;
+    // Sync start — do not await ctx; tick no-ops until running.
+    this.primeFromGesture();
+    this.nextBeatIndex = this.beatIndexAt(this.getMediaTime());
+    this.timer = window.setInterval(() => this.tick(), 25);
+    this.tick();
   }
 
   private stopScheduler(): void {
@@ -366,27 +506,28 @@ export class Metronome {
   }
 
   private clearPending(): void {
-    for (const osc of this.pendingOsc) {
+    for (const src of this.pendingSources) {
       try {
-        osc.stop();
+        src.stop();
       } catch {
         // already stopped
       }
       try {
-        osc.disconnect();
+        src.disconnect();
       } catch {
         // already disconnected
       }
     }
-    this.pendingOsc = [];
+    this.pendingSources = [];
   }
 
   private tick(): void {
     const ctx = this.ctx;
     const master = this.master;
     if (!ctx || !master || !this.enabled || !this.playing) return;
+    if (!this.bufHigh || !this.bufLow) return;
     if (ctx.state !== "running") {
-      void ctx.resume();
+      void ctx.resume().catch(() => undefined);
       return;
     }
 
@@ -399,52 +540,77 @@ export class Metronome {
     const origin = this.grid.downbeatOffsetSec || 0;
     const bpb = this.beatsPerBar();
     const want = this.beatIndexAt(mediaNow);
-    if (this.nextBeatIndex < want - 1 || this.nextBeatIndex > want + 4) {
+    if (this.nextBeatIndex < want - 1 || this.nextBeatIndex > want + 8) {
       this.nextBeatIndex = want;
     }
+
+    // Schedule far enough that ear-lag delayed fires stay inside the horizon.
     const until = mediaNow + this.scheduleHorizonSec;
     const ctxNow = ctx.currentTime;
+    const ear = this.mediaEarLagSec;
+    // Subtract Web Audio output path so relative media↔click stays stable.
+    const clickOut =
+      (typeof ctx.baseLatency === "number" ? ctx.baseLatency : 0) +
+      (typeof ctx.outputLatency === "number" ? ctx.outputLatency : 0);
 
     while (true) {
-      const tAbs = origin + this.nextBeatIndex * beatSec;
+      const beatIndex = this.nextBeatIndex;
+      const tAbs = origin + beatIndex * beatSec;
       if (tAbs > until) break;
-      if (tAbs >= 0 && tAbs >= mediaNow - 0.002) {
-        const when = ctxNow + (tAbs - mediaNow);
-        if (when <= ctxNow + this.scheduleHorizonSec + 0.05) {
-          const beatInBar = ((this.nextBeatIndex % bpb) + bpb) % bpb;
-          this.scheduleClick(when, beatInBar === 0);
-        }
+      if (tAbs < 0) {
+        this.nextBeatIndex += 1;
+        if (this.nextBeatIndex > 1e7) break;
+        continue;
+      }
+      // Heard click meets heard beat: fire ear-lag after media beat time,
+      // minus AudioContext output latency (media has its own ear lag).
+      const when = ctxNow + (tAbs - mediaNow) + ear - clickOut;
+      if (when < ctxNow - 0.002) {
+        this.nextBeatIndex += 1;
+        if (this.nextBeatIndex > 1e7) break;
+        continue;
+      }
+      if (when <= ctxNow + this.scheduleHorizonSec + 0.08) {
+        const beatInBar = ((beatIndex % bpb) + bpb) % bpb;
+        const level = beatInBar === 0 ? 1 : 0.55;
+        this.scheduleBufferClick(when, beatInBar === 0, this.volume * level);
       }
       this.nextBeatIndex += 1;
       if (this.nextBeatIndex > 1e7) break;
     }
   }
 
-  private scheduleClick(when: number, downbeat: boolean): void {
+  private scheduleBufferClick(
+    when: number,
+    downbeat: boolean,
+    gainLevel: number,
+  ): void {
     const ctx = this.ctx;
     const master = this.master;
-    if (!ctx || !master) return;
-    if (when < ctx.currentTime - 0.002) return;
-
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "square";
-    osc.frequency.value = downbeat ? 1200 : 800;
-    const peak = downbeat ? 1 : 0.55;
+    const buf = downbeat ? this.bufHigh : this.bufLow;
+    if (!ctx || !master || !buf) return;
     const t0 = Math.max(when, ctx.currentTime);
-    gain.gain.setValueAtTime(0.0001, t0);
-    gain.gain.exponentialRampToValueAtTime(peak, t0 + 0.003);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.045);
-    osc.connect(gain);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const gain = ctx.createGain();
+    const level = Math.max(0.0001, Math.min(1, gainLevel));
+    gain.gain.setValueAtTime(level, t0);
+    src.connect(gain);
     gain.connect(master);
-    this.pendingOsc.push(osc);
-    osc.start(t0);
-    osc.stop(t0 + 0.05);
-    osc.onended = () => {
-      const i = this.pendingOsc.indexOf(osc);
-      if (i >= 0) this.pendingOsc.splice(i, 1);
+    this.pendingSources.push(src);
+    this.clicksStarted += 1;
+    try {
+      src.start(t0);
+    } catch {
+      const i = this.pendingSources.indexOf(src);
+      if (i >= 0) this.pendingSources.splice(i, 1);
+      return;
+    }
+    src.onended = () => {
+      const i = this.pendingSources.indexOf(src);
+      if (i >= 0) this.pendingSources.splice(i, 1);
       try {
-        osc.disconnect();
+        src.disconnect();
         gain.disconnect();
       } catch {
         // already disconnected
