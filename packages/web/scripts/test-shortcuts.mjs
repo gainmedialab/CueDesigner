@@ -18,6 +18,9 @@ function matchTransportShortcut(e) {
   if (code === "KeyS" || key === "s") return "snap";
   if (code === "KeyJ" || key === "j") return "home";
   if (code === "KeyC" || key === "c") return "click";
+  if (code === "KeyI" || key === "i") return "setLoopIn";
+  if (code === "KeyO" || key === "o") return "setLoopOut";
+  if (code === "KeyL" || key === "l") return "toggleLoop";
   return null;
 }
 
@@ -34,6 +37,12 @@ assert.equal(matchTransportShortcut({ key: "n" }), "placeCue");
 assert.equal(matchTransportShortcut({ code: "KeyN", altKey: true }), "placeCue");
 assert.equal(matchTransportShortcut({ code: "KeyC", altKey: true }), null);
 assert.equal(matchTransportShortcut({ code: "KeyN", metaKey: true }), null);
+assert.equal(matchTransportShortcut({ code: "KeyI" }), "setLoopIn");
+assert.equal(matchTransportShortcut({ code: "KeyO" }), "setLoopOut");
+assert.equal(matchTransportShortcut({ code: "KeyL" }), "toggleLoop");
+assert.equal(matchTransportShortcut({ key: "i" }), "setLoopIn");
+assert.equal(matchTransportShortcut({ code: "KeyL", altKey: true }), null);
+assert.equal(matchTransportShortcut({ code: "KeyI", metaKey: true }), null);
 
 console.log(
   JSON.stringify({
@@ -43,5 +52,6 @@ console.log(
     cmdCIgnored: true,
     placeCueViaN: true,
     altNAllowed: true,
+    loopInOutToggle: true,
   }),
 );

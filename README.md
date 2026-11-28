@@ -105,7 +105,29 @@ Use the **BPM bar** under transport:
 | **J** | Home — seek playhead to start (same as transport ⇤) |
 | **C** | Toggle Click metronome (auditions a tick when turning on) |
 | **N** | Place cue at playhead on every **Place on** department (same as **Cue at playhead**; **Alt+N** = free / unsnapped) |
+| **I** | Set rehearsal loop **In (A)** at playhead |
+| **O** | Set rehearsal loop **Out (B)** at playhead |
+| **L** | Toggle rehearsal loop arm (wrap B→A while playing) |
 | ⌘/Ctrl-click | Multi-select cues (for **Copy to…** / multi-delete) |
+
+## Rehearsal loop + countdown (Phase 1)
+
+**Loop** bar under transport (Internal Sync only — LTC/MTC chase does not wrap file audio):
+
+| Control | What it does |
+|---------|----------------|
+| **A–B** | Manual In/Out. Set **In** / **Out** at the playhead (**I** / **O**), arm **Loop** (**L**). While playing, wrap from B → A. |
+| **Pause loop** | Play a take, then **Pause** / **Space** — captures play-start → pause as A–B and arms Loop automatically. |
+| **Clear** | Clears In/Out and disarms Loop. |
+| Timeline | Green **A** / orange **B** markers + shaded region when both points are set. |
+
+**Countdown to next cue** sits in the transport row (Next −mm:ss.mmm + dept / cue label / hit time). Updates live while playing or scrubbing. Scope selector:
+
+| Scope | Cues considered |
+|-------|-----------------|
+| **All depts** | Every cue after the playhead |
+| **Active dept** | Only the highlighted department |
+| **Place on** | Only departments checked under Place on |
 
 **Timeline zoom:** **Ctrl**/⌘ + mouse wheel zooms toward the cursor; `−` / `+` / slider / **G**/**H** zoom around the playhead. When zoomed in, scroll horizontally (wheel also pans). During Internal playback or LTC/MTC chase the timeline **follows the playhead** when **Follow** is on (playhead kept ~35% into the visible lane). The checkbox latches across play/pause; manual scroll temporarily suspends follow (checkbox stays on; **Play** or re-check clears suspension). The waveform redraws for the visible span at device-pixel density, keyed to the same file-relative `tAbs` as the playhead, cues, and grid. Snap and Alt free-move keep working at every zoom. Zoom is kept for the session and optionally written into the project file as `timelineZoom` (1 = fit duration).
 
