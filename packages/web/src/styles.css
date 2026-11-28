@@ -295,6 +295,47 @@ input[type="color"] {
   border-color: rgba(232, 93, 93, 0.55);
 }
 
+.generate-block {
+  margin-left: 0.5rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--border);
+}
+
+.generate-arm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.generate-arm input {
+  accent-color: var(--danger);
+}
+
+.generate-status.generate-armed .sync-lock-dot {
+  background: var(--playhead);
+}
+
+.generate-status.generate-emitting .sync-lock-dot {
+  background: #3ecf8e;
+}
+
+.generate-offset-hint {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.generate-safety {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--danger);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .grid-bar {
   display: flex;
   flex-wrap: wrap;

@@ -84,6 +84,14 @@ import {
   type LtcAudioDeviceInfo,
   type MidiInputInfo,
 } from "./timecodeSync";
+import {
+  GENERATE_FLAVOURS,
+  LtcGenerator,
+  emptyGenerateStatus,
+  type GenerateFlavour,
+  type GenerateStatusSnapshot,
+  type LtcOutputDeviceInfo,
+} from "./timecodeGenerate";
 import { buildZipBlob, downloadBlob, readZipEntries } from "./zipDownload";
 
 const ACCEPT_AUDIO = ".wav,.aiff,.aif,.mp3,.m4a,.ogg,audio/*";
@@ -146,9 +154,21 @@ export function App() {
   const [midiInputs, setMidiInputs] = useState<MidiInputInfo[]>([]);
   const [midiInputId, setMidiInputId] = useState<string>("");
   const [midiInputsLoading, setMidiInputsLoading] = useState(false);
+  /** Outgoing TC generate — independent of Sync chase; session only. */
+  const [generateFlavour, setGenerateFlavour] =
+    useState<GenerateFlavour>("ltc");
+  const [generateArmed, setGenerateArmed] = useState(false);
+  const [generateStatus, setGenerateStatus] = useState<GenerateStatusSnapshot>(
+    () => emptyGenerateStatus("ltc"),
+  );
+  const [ltcOutDevices, setLtcOutDevices] = useState<LtcOutputDeviceInfo[]>([]);
+  const [ltcOutDeviceId, setLtcOutDeviceId] = useState<string>("");
+  const [ltcOutChannelIndex, setLtcOutChannelIndex] = useState(0);
+  const [ltcOutDevicesLoading, setLtcOutDevicesLoading] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
+  const generateRef = useRef<LtcGenerator | null>(null);
   const projectClockRef = useRef({
     fps: project.settings.fps,
     showTcOffsetSec: project.settings.showTcOffsetSec,
@@ -161,6 +181,11 @@ export function App() {
   ltcRouteRef.current = { deviceId: ltcDeviceId, channelIndex: ltcChannelIndex };
   const midiRouteRef = useRef({ inputId: "" });
   midiRouteRef.current = { inputId: midiInputId };
+  const ltcOutRouteRef = useRef({ deviceId: "", channelIndex: 0 });
+  ltcOutRouteRef.current = {
+    deviceId: ltcOutDeviceId,
+    channelIndex: ltcOutChannelIndex,
+  };
   const audioInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const sharePackageInputRef = useRef<HTMLInputElement>(null);
@@ -266,7 +291,10 @@ export function App() {
     metronome.setMediaTimeGetter(() => audioRef.current?.currentTime ?? 0);
     metronome.attachMediaElement(audio);
     const onEnded = () => setPlaying(false);
-    const onSeeked = () => metronomeRef.current?.resync();
+    const onSeeked = () => {
+      metronomeRef.current?.resync();
+      generateRef.current?.resync();
+    };
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("seeked", onSeeked);
 
@@ -280,6 +308,16 @@ export function App() {
     syncRef.current = sync;
     sync.onStatus((s) => setSyncStatus(s));
 
+    const generate = new LtcGenerator({
+      getProjectFps: () => projectClockRef.current.fps,
+      getShowTcOffsetSec: () => projectClockRef.current.showTcOffsetSec,
+      getMediaTime: () => audioRef.current?.currentTime ?? 0,
+      getOutputDeviceId: () => ltcOutRouteRef.current.deviceId || null,
+      getOutputChannelIndex: () => ltcOutRouteRef.current.channelIndex,
+    });
+    generateRef.current = generate;
+    generate.onStatus((s) => setGenerateStatus(s));
+
     return () => {
       audio.pause();
       audio.removeEventListener("ended", onEnded);
@@ -289,6 +327,8 @@ export function App() {
       metronomeRef.current = null;
       sync.dispose();
       syncRef.current = null;
+      generate.dispose();
+      generateRef.current = null;
     };
   }, []);
 
@@ -340,8 +380,40 @@ export function App() {
     }
   }, []);
 
+  const refreshLtcOutDevices = useCallback(async () => {
+    setLtcOutDevicesLoading(true);
+    try {
+      const devices = await LtcGenerator.listLtcOutputDevices();
+      setLtcOutDevices(devices);
+      const prevId = ltcOutRouteRef.current.deviceId;
+      const nextId =
+        prevId && devices.some((d) => d.deviceId === prevId)
+          ? prevId
+          : LtcGenerator.pickDefaultOutputId(devices);
+      const selected =
+        devices.find((d) => d.deviceId === nextId) ?? devices[0];
+      const max = Math.max(1, selected?.channelCount ?? 1);
+      const nextCh = Math.min(ltcOutRouteRef.current.channelIndex, max - 1);
+      ltcOutRouteRef.current = { deviceId: nextId, channelIndex: nextCh };
+      setLtcOutDeviceId(nextId);
+      setLtcOutChannelIndex(nextCh);
+    } catch (err) {
+      setStatus(
+        `LTC output list failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setLtcOutDevicesLoading(false);
+    }
+  }, []);
+
+  // Enumerate LTC outputs once so Generate can arm without a blank device list.
+  useEffect(() => {
+    void refreshLtcOutDevices();
+  }, [refreshLtcOutDevices]);
+
   // Switch LTC / MTC / Internal (permission prompts happen here).
   // External sync is chase-only: pause file transport immediately on leave Internal.
+  // Generate stays independent — arm/disarm does not tear down chase I/O.
   useEffect(() => {
     const sync = syncRef.current;
     if (!sync) return;
@@ -350,6 +422,7 @@ export function App() {
       if (audio) audio.pause();
       setPlaying(false);
       metronomeRef.current?.setPlaying(false);
+      generateRef.current?.setPlaying(false);
     }
     let cancelled = false;
     void (async () => {
@@ -371,6 +444,11 @@ export function App() {
   // Keep FPS-match badge in sync when project FPS / offset changes.
   useEffect(() => {
     syncRef.current?.refreshProjectClock();
+  }, [project.settings.fps, project.settings.showTcOffsetSec]);
+
+  // Keep generate FPS / offset in sync (re-lock scheduled frames on change).
+  useEffect(() => {
+    generateRef.current?.resync();
   }, [project.settings.fps, project.settings.showTcOffsetSec]);
 
   // Keep metronome grid / enable / volume in sync with project settings
@@ -408,6 +486,7 @@ export function App() {
 
   useEffect(() => {
     metronomeRef.current?.setPlaying(playing);
+    generateRef.current?.setPlaying(playing);
   }, [playing]);
 
   useEffect(() => {
@@ -670,8 +749,9 @@ export function App() {
     const clamped = Math.max(0, Math.min(t, audio?.duration || duration || 0));
     if (audio) audio.currentTime = clamped;
     setCurrentTime(clamped);
-    // Immediate resync (seeked also fires); keeps click locked across scrub.
+    // Immediate resync (seeked also fires); keeps click + LTC out locked across scrub.
     metronomeRef.current?.resync();
+    generateRef.current?.resync();
   }, [duration]);
 
   const chaseOnly = syncSource === "ltc" || syncSource === "mtc";
@@ -693,6 +773,7 @@ export function App() {
         // is non-blocking — never await click priming before audio.play().
         // primeFromGesture runs inside resume() under this user gesture stack.
         void metronomeRef.current?.resume();
+        generateRef.current?.primeFromGesture();
         const playP = audio.play();
         await playP;
         setPlaying(true);
@@ -1692,6 +1773,187 @@ export function App() {
             {!syncStatus.fpsMatch ? (
               <span className="sync-fps-warn">FPS≠</span>
             ) : null}
+          </span>
+        </div>
+        <div
+          className="sync-block generate-block"
+          aria-label="Outgoing timecode generate"
+        >
+          <label className="sync-source-field">
+            Generate
+            <select
+              value={generateFlavour}
+              title="Outgoing TC flavour. LTC out ships now; MTC out is stubbed."
+              aria-label="Outgoing timecode flavour"
+              onChange={(e) => {
+                const next = e.target.value as GenerateFlavour;
+                setGenerateFlavour(next);
+                if (next === "mtc" && generateArmed) {
+                  setGenerateArmed(false);
+                  void generateRef.current?.setArmed(false);
+                }
+              }}
+            >
+              {GENERATE_FLAVOURS.map((flav) => (
+                <option
+                  key={flav}
+                  value={flav}
+                  disabled={flav === "mtc"}
+                >
+                  {flav === "ltc" ? "LTC out" : "MTC out (soon)"}
+                </option>
+              ))}
+            </select>
+          </label>
+          {generateFlavour === "ltc" ? (
+            <>
+              <label className="sync-source-field sync-ltc-device-field">
+                Out
+                <select
+                  value={ltcOutDeviceId}
+                  disabled={ltcOutDevicesLoading || ltcOutDevices.length === 0}
+                  title="Audio output for LTC — use a dedicated TC feed (BlackHole / Dante / interface), not FOH or monitors"
+                  aria-label="LTC audio output device"
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    const info = ltcOutDevices.find((d) => d.deviceId === id);
+                    const max = Math.max(1, info?.channelCount ?? 1);
+                    const ch = Math.min(ltcOutChannelIndex, max - 1);
+                    ltcOutRouteRef.current = { deviceId: id, channelIndex: ch };
+                    setLtcOutDeviceId(id);
+                    setLtcOutChannelIndex(ch);
+                    void generateRef.current?.applyRoute();
+                  }}
+                >
+                  {ltcOutDevices.length === 0 ? (
+                    <option value="">
+                      {ltcOutDevicesLoading ? "Scanning…" : "No outputs"}
+                    </option>
+                  ) : (
+                    ltcOutDevices.map((d) => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label} ({d.channelCount} ch)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="sync-source-field">
+                Ch
+                <select
+                  value={ltcOutChannelIndex}
+                  disabled={
+                    ltcOutDevicesLoading || ltcOutDevices.length === 0
+                  }
+                  title="Output channel for LTC (other channels stay silent on this context)"
+                  aria-label="LTC output channel"
+                  onChange={(e) => {
+                    const ch = Number(e.target.value);
+                    ltcOutRouteRef.current = {
+                      deviceId: ltcOutDeviceId,
+                      channelIndex: ch,
+                    };
+                    setLtcOutChannelIndex(ch);
+                    void generateRef.current?.applyRoute();
+                  }}
+                >
+                  {Array.from(
+                    {
+                      length: Math.max(
+                        1,
+                        ltcOutDevices.find((d) => d.deviceId === ltcOutDeviceId)
+                          ?.channelCount ?? 1,
+                      ),
+                    },
+                    (_, i) => (
+                      <option key={i} value={i}>
+                        {i + 1}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="sync-refresh-btn"
+                disabled={ltcOutDevicesLoading}
+                title="Re-enumerate audio outputs"
+                onClick={() => {
+                  void (async () => {
+                    await refreshLtcOutDevices();
+                    void generateRef.current?.applyRoute();
+                  })();
+                }}
+              >
+                {ltcOutDevicesLoading ? "…" : "↻"}
+              </button>
+              <label
+                className="generate-arm"
+                title="Arm LTC out. Emits only while Internal transport plays. Does not affect Sync chase."
+              >
+                <input
+                  type="checkbox"
+                  checked={generateArmed}
+                  disabled={
+                    generateFlavour !== "ltc" ||
+                    ltcOutDevices.length === 0 ||
+                    !ltcOutDeviceId
+                  }
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setGenerateArmed(on);
+                    void (async () => {
+                      try {
+                        if (on) await refreshLtcOutDevices();
+                        await generateRef.current?.setArmed(on);
+                        if (on && playing) {
+                          generateRef.current?.primeFromGesture();
+                          generateRef.current?.setPlaying(true);
+                        }
+                      } catch (err) {
+                        setGenerateArmed(false);
+                        setStatus(
+                          `LTC generate arm failed: ${
+                            err instanceof Error ? err.message : String(err)
+                          }`,
+                        );
+                      }
+                    })();
+                  }}
+                />
+                Arm
+              </label>
+            </>
+          ) : null}
+          <span
+            className={`sync-status generate-status${
+              generateStatus.emitting ? " generate-emitting" : ""
+            }${generateArmed ? " generate-armed" : ""}`}
+            title={generateStatus.detail}
+          >
+            <span className="sync-lock-dot" aria-hidden />
+            <span className="sync-lock-label">
+              {generateFlavour === "mtc"
+                ? "MTC stub"
+                : generateStatus.emitting
+                  ? "Generating"
+                  : generateArmed
+                    ? "Armed"
+                    : "Disarmed"}
+            </span>
+            {generateStatus.tcDisplay ? (
+              <span className="sync-tc">{generateStatus.tcDisplay}</span>
+            ) : (
+              <span className="sync-tc generate-offset-hint">
+                offset {formatTimecode(
+                  project.settings.showTcOffsetSec,
+                  project.settings.fps,
+                )}
+              </span>
+            )}
+          </span>
+          <span className="generate-safety" title="Never route LTC into FOH or cue monitors">
+            LTC ≠ FOH
           </span>
         </div>
       </div>
