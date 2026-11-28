@@ -186,7 +186,89 @@ button.mode-toggle.edit {
 .topbar .actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
+}
+
+/* In-app File menu (web). Electron uses the native application File menu. */
+.file-menu-wrap {
+  position: relative;
+}
+
+.file-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+.file-menu-trigger.open {
+  border-color: #3d4d66;
+  background: #1c2430;
+}
+
+.file-menu-caret {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.file-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 50;
+  min-width: 14.5rem;
+  margin: 0;
+  padding: 0.35rem;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.file-menu li[role="none"] {
+  margin: 0;
+}
+
+.file-menu button[role="menuitem"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  width: 100%;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-align: left;
+  color: var(--text);
+}
+
+.file-menu button[role="menuitem"]:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.file-menu button[role="menuitem"] kbd {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+.file-menu-sep {
+  height: 1px;
+  margin: 0.3rem 0.4rem;
+  background: var(--border);
+  list-style: none;
 }
 
 /* Transport + progressive-disclosure drawers (HIG: primary always visible). */

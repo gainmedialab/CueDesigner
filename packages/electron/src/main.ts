@@ -10,7 +10,26 @@ app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
-/** Standard macOS/Win menu — Copy stays ⌘/Ctrl+C (never bare C). */
+type BridgedFileAction =
+  | "new"
+  | "open"
+  | "open-shared"
+  | "save"
+  | "share"
+  | "export";
+
+/** Send File menu action to the focused CueDesigner window. */
+function sendFileAction(action: BridgedFileAction): void {
+  const win =
+    BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send("cue:file", action);
+}
+
+/**
+ * Standard macOS/Win menu — File owns New/Open/Save/Share/Export (HIG).
+ * Copy stays ⌘/Ctrl+C (never bare C).
+ */
 function installApplicationMenu(): void {
   const isMac = process.platform === "darwin";
   const template: Electron.MenuItemConstructorOptions[] = [
@@ -34,7 +53,42 @@ function installApplicationMenu(): void {
       : []),
     {
       label: "File",
-      submenu: [isMac ? { role: "close" } : { role: "quit" }],
+      submenu: [
+        {
+          label: "New",
+          accelerator: "CmdOrControl+N",
+          click: () => sendFileAction("new"),
+        },
+        {
+          label: "Open…",
+          accelerator: "CmdOrControl+O",
+          click: () => sendFileAction("open"),
+        },
+        {
+          label: "Open Shared…",
+          accelerator: "CmdOrControl+Shift+O",
+          click: () => sendFileAction("open-shared"),
+        },
+        { type: "separator" },
+        {
+          label: "Save",
+          accelerator: "CmdOrControl+S",
+          click: () => sendFileAction("save"),
+        },
+        {
+          label: "Share…",
+          accelerator: "CmdOrControl+Shift+S",
+          click: () => sendFileAction("share"),
+        },
+        { type: "separator" },
+        {
+          label: "Export…",
+          accelerator: "CmdOrControl+E",
+          click: () => sendFileAction("export"),
+        },
+        { type: "separator" },
+        isMac ? { role: "close" } : { role: "quit" },
+      ],
     },
     {
       label: "Edit",

@@ -221,10 +221,20 @@ export function App() {
   /** Keyboard shortcut / help popover (?). */
   const [helpOpen, setHelpOpen] = useState(false);
   const helpPopoverRef = useRef<HTMLDivElement | null>(null);
+  /** In-app File menu (web only — Electron uses the native application menu). */
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const fileMenuRef = useRef<HTMLDivElement | null>(null);
+  const isDesktopShell = Boolean(
+    window.cueDesktop?.isDesktop ?? window.cueDesktop,
+  );
   const shellDrawerRef = useRef(shellDrawer);
   shellDrawerRef.current = shellDrawer;
   const helpOpenRef = useRef(helpOpen);
   helpOpenRef.current = helpOpen;
+  const fileMenuOpenRef = useRef(fileMenuOpen);
+  fileMenuOpenRef.current = fileMenuOpen;
+  /** Filled after New/Open/Save handlers are defined; used by keydown + desktop IPC. */
+  const runFileActionRef = useRef<(action: string) => void>(() => undefined);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const syncRef = useRef<TimecodeSync | null>(null);
@@ -1116,15 +1126,50 @@ export function App() {
       }
       if (isTextEntryTarget(e.target)) return;
 
-      // Escape closes shell drawers / help popover before transport keys.
+      // Escape closes File menu / shell drawers / help before transport keys.
       if (e.code === "Escape" || e.key === "Escape") {
-        if (helpOpenRef.current || shellDrawerRef.current) {
+        if (
+          fileMenuOpenRef.current ||
+          helpOpenRef.current ||
+          shellDrawerRef.current
+        ) {
           e.preventDefault();
           e.stopPropagation();
+          setFileMenuOpen(false);
           setHelpOpen(false);
           setShellDrawer(null);
         }
         return;
+      }
+
+      // Web File accelerators (Electron uses the native File menu instead).
+      if (
+        !isDesktopShell &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.repeat
+      ) {
+        const fileAction =
+          e.code === "KeyN" && !e.shiftKey
+            ? "new"
+            : e.code === "KeyO" && e.shiftKey
+              ? "open-shared"
+              : e.code === "KeyO" && !e.shiftKey
+                ? "open"
+                : e.code === "KeyS" && e.shiftKey
+                  ? "share"
+                  : e.code === "KeyS" && !e.shiftKey
+                    ? "save"
+                    : e.code === "KeyE" && !e.shiftKey
+                      ? "export"
+                      : null;
+        if (fileAction) {
+          e.preventDefault();
+          e.stopPropagation();
+          setFileMenuOpen(false);
+          runFileActionRef.current(fileAction);
+          return;
+        }
       }
 
       // ? / Shift+/ toggles shortcut help (not a transport shortcut).
@@ -1138,6 +1183,7 @@ export function App() {
         e.stopPropagation();
         setHelpOpen((prev) => !prev);
         setShellDrawer(null);
+        setFileMenuOpen(false);
         return;
       }
 
@@ -1236,13 +1282,17 @@ export function App() {
     const unsubDesktop = window.cueDesktop?.onShortcut((action) => {
       runDesktopAction(action);
     });
+    const unsubFile = window.cueDesktop?.onFileAction?.((action) => {
+      runFileActionRef.current(action);
+    });
 
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("cuedesigner-shortcut", onDesktopShortcut);
       unsubDesktop?.();
+      unsubFile?.();
     };
-  }, []);
+  }, [isDesktopShell]);
 
   // Dismiss shortcut help when clicking outside the popover (HIG: light dismiss).
   useEffect(() => {
@@ -1256,6 +1306,19 @@ export function App() {
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
   }, [helpOpen]);
+
+  // Dismiss in-app File menu on outside click.
+  useEffect(() => {
+    if (!fileMenuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const root = fileMenuRef.current;
+      if (!root) return;
+      if (e.target instanceof Node && root.contains(e.target)) return;
+      setFileMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [fileMenuOpen]);
 
   const clearPlaybackMedia = useCallback(() => {
     if (mediaUrl) URL.revokeObjectURL(mediaUrl);
@@ -1818,6 +1881,31 @@ export function App() {
           ? "Armed"
           : "Disarmed";
 
+  runFileActionRef.current = (action: string) => {
+    switch (action) {
+      case "new":
+        onNewProject();
+        break;
+      case "open":
+        projectInputRef.current?.click();
+        break;
+      case "open-shared":
+        sharePackageInputRef.current?.click();
+        break;
+      case "save":
+        void onSaveProject();
+        break;
+      case "share":
+        void onShareProject();
+        break;
+      case "export":
+        setExportOpen(true);
+        break;
+      default:
+        break;
+    }
+  };
+
   const commitInspectorTime = () => {
     if (inspectorTimeDraft == null || !selectedCueId) {
       setInspectorTimeDraft(null);
@@ -1870,6 +1958,124 @@ export function App() {
           {` · ${project.settings.bpm} BPM · ${sigNum}/${sigDen} · ${project.settings.fps}`}
         </div>
         <div className="actions">
+          {!isDesktopShell ? (
+            <div className="file-menu-wrap" ref={fileMenuRef}>
+              <button
+                type="button"
+                className={`file-menu-trigger${fileMenuOpen ? " open" : ""}`}
+                aria-haspopup="menu"
+                aria-expanded={fileMenuOpen}
+                aria-controls="topbar-file-menu"
+                title="File menu (New, Open, Save, Share, Export)"
+                onClick={() => {
+                  setFileMenuOpen((prev) => !prev);
+                  setHelpOpen(false);
+                  setShellDrawer(null);
+                }}
+              >
+                File
+                <span className="file-menu-caret" aria-hidden>
+                  ▾
+                </span>
+              </button>
+              {fileMenuOpen ? (
+                <ul
+                  id="topbar-file-menu"
+                  className="file-menu"
+                  role="menu"
+                  aria-label="File"
+                >
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={editsLocked}
+                      title={editsLocked ? SHOW_MODE_BANNER : "⌘/Ctrl+N"}
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        onNewProject();
+                      }}
+                    >
+                      <span>New</span>
+                      <kbd>⌘N</kbd>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="⌘/Ctrl+O"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        projectInputRef.current?.click();
+                      }}
+                    >
+                      <span>Open…</span>
+                      <kbd>⌘O</kbd>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="Open a teammate’s .cueproj.zip (⌘/Ctrl+Shift+O)"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        sharePackageInputRef.current?.click();
+                      }}
+                    >
+                      <span>Open Shared…</span>
+                      <kbd>⇧⌘O</kbd>
+                    </button>
+                  </li>
+                  <li role="separator" className="file-menu-sep" />
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="⌘/Ctrl+S"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        void onSaveProject();
+                      }}
+                    >
+                      <span>Save</span>
+                      <kbd>⌘S</kbd>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="Download portable .cueproj.zip (⌘/Ctrl+Shift+S)"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        void onShareProject();
+                      }}
+                    >
+                      <span>Share…</span>
+                      <kbd>⇧⌘S</kbd>
+                    </button>
+                  </li>
+                  <li role="separator" className="file-menu-sep" />
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      title="⌘/Ctrl+E"
+                      onClick={() => {
+                        setFileMenuOpen(false);
+                        setExportOpen(true);
+                      }}
+                    >
+                      <span>Export…</span>
+                      <kbd>⌘E</kbd>
+                    </button>
+                  </li>
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
           <button
             type="button"
             className={editsLocked ? "mode-toggle show" : "mode-toggle edit"}
@@ -1888,37 +2094,6 @@ export function App() {
             }}
           >
             {editsLocked ? "Show Mode" : "Edit Mode"}
-          </button>
-          <button
-            type="button"
-            onClick={onNewProject}
-            disabled={editsLocked}
-            title={editsLocked ? SHOW_MODE_BANNER : undefined}
-          >
-            New
-          </button>
-          <button type="button" onClick={() => projectInputRef.current?.click()}>
-            Open
-          </button>
-          <button type="button" onClick={onSaveProject}>
-            Save
-          </button>
-          <button
-            type="button"
-            onClick={() => void onShareProject()}
-            title="Download a portable .cueproj.zip (project + media) for USB / Drive / Dropbox handoff"
-          >
-            Share
-          </button>
-          <button
-            type="button"
-            onClick={() => sharePackageInputRef.current?.click()}
-            title="Open a teammate’s .cueproj.zip share package (enters Show Mode by default)"
-          >
-            Open shared
-          </button>
-          <button type="button" onClick={() => setExportOpen(true)}>
-            Export
           </button>
           <button
             type="button"
@@ -2238,6 +2413,10 @@ export function App() {
                   </li>
                   <li>
                     <kbd>?</kbd> This help · <kbd>Esc</kbd> close panels
+                  </li>
+                  <li>
+                    File: <kbd>⌘N</kbd> New · <kbd>⌘O</kbd> Open ·{" "}
+                    <kbd>⌘S</kbd> Save · <kbd>⌘E</kbd> Export
                   </li>
                   <li>
                     Hold <kbd>Alt</kbd> while placing / dragging to bypass snap

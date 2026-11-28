@@ -73,6 +73,10 @@ When you have an Apple Developer account, set on the packaging Mac:
 
 Then remove or override `mac.identity: null` and re-run `npm run package:mac`. electron-builder will sign with hardened runtime + the entitlements in `build/entitlements.mac.plist` (mic for LTC, USB MIDI, etc.).
 
+## Application menu (macOS HIG)
+
+The native **File** menu owns New / Open… / Open Shared… / Save / Share… / Export… (with standard ⌘ accelerators). The web UI hides its in-app File dropdown when `cueDesktop` is present and keeps **Edit Mode / Show Mode** + **Import audio** in the window chrome. Bare **C** / **N** still bridge to Click / cue-at-playhead so the Edit menu’s ⌘C Copy is never stolen.
+
 ## Offline show defaults
 
 - Bundled fonts (no Google Fonts CDN at runtime)
@@ -85,8 +89,8 @@ Then remove or override `mac.identity: null` and re-run `npm run package:mac`. e
 
 | Path | Role |
 |------|------|
-| `src/main.ts` | BrowserWindow + offline / permission policy |
-| `src/preload.ts` | Reserved bridge (empty for Phase 1 chase) |
+| `src/main.ts` | BrowserWindow + application menu + shortcut/file IPC |
+| `src/preload.ts` | `cueDesktop` bridge (shortcuts + File menu actions) |
 | `renderer/` | Copied web `dist` (gitignored; created before package) |
 | `build/icon.png` | App icon source for electron-builder |
 | `build/entitlements.mac.plist` | Hardened Runtime entitlements |

@@ -79,6 +79,8 @@ npm run typecheck
 
 The default Edit / Show Mode shell keeps **Play · clock · scrub · Next countdown · Cue at playhead** on the primary transport row. Secondary controls use progressive disclosure (macOS HIG–aligned) via trailing chips — **Sync**, **Gen**, **Loop**, **Grid** — each opening one exclusive drawer. Armed / locked / generating states stay visible on the chips when drawers are closed. Keyboard shortcuts live in a **?** help popover (also **?** / Shift+/); **Esc** dismisses drawers and help. Intended for desktop / Electron at ~1280px+; not a mobile layout pass.
 
+**File menu (HIG):** New / Open / Open Shared / Save / Share / Export live under **File** — native application menu in Electron (with ⌘/Ctrl accelerators), in-app **File** dropdown on web. Topbar chrome keeps **Edit Mode / Show Mode** and primary **Import audio**.
+
 ## BPM + magnetic snap (Phase 1)
 
 Open the **Grid** drawer from the transport trailing chips:
