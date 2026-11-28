@@ -29,9 +29,18 @@ const cue = createCue({
   cueNoDept: "1",
   label: "Hit",
 });
+// Same absolute time on a second department (multi-dept place / copy shape)
+const cue2 = createCue({
+  id: "c2",
+  tAbs: 1.25,
+  departmentId: withMedia.departments[1].id,
+  cueNoDept: "1",
+  label: "Hit",
+  note: "copied",
+});
 const project = {
   ...withMedia,
-  cues: placeCue(withMedia.cues, cue),
+  cues: placeCue(placeCue(withMedia.cues, cue), cue2),
 };
 
 const fakeWav = new TextEncoder().encode("RIFF....WAVEfmt ");
@@ -62,8 +71,17 @@ const asMap = new Map(
 
 const parsed = parseSharePackage(asMap);
 assert.equal(parsed.project.name, "Share Test Show");
-assert.equal(parsed.project.cues.length, 1);
+assert.equal(parsed.project.cues.length, 2);
 assert.equal(parsed.project.cues[0].label, "Hit");
+assert.equal(
+  parsed.project.cues.filter((c) => c.tAbs === 1.25).length,
+  2,
+  "multi-dept cues at same time persist",
+);
+assert.ok(
+  parsed.project.cues.some((c) => c.note === "copied"),
+  "copied cue note round-trips",
+);
 assert.ok(parsed.media, "media should round-trip");
 assert.equal(parsed.media.name, "show-track.wav");
 assert.deepEqual([...parsed.media.bytes], [...fakeWav]);
@@ -85,7 +103,7 @@ const parsedBare = parseSharePackage(
     ]),
   ),
 );
-assert.equal(parsedBare.project.cues.length, 1);
+assert.equal(parsedBare.project.cues.length, 2);
 assert.equal(parsedBare.media, undefined);
 
 console.log("test-share-package: ok");
