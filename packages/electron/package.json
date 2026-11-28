@@ -2,19 +2,24 @@
   "name": "@cuedesigner/electron",
   "version": "0.1.0",
   "private": true,
+  "description": "CueDesigner desktop shell (macOS-first Electron)",
+  "author": "gainmedialab",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "npm run build && electron .",
-    "start": "electron ."
-  },
-  "dependencies": {
-    "@cuedesigner/web": "*"
+    "start": "electron .",
+    "prepare:renderer": "node scripts/prepare-renderer.mjs",
+    "prepackage": "npm run build && npm run prepare:renderer",
+    "package:mac": "node scripts/ensure-macos.mjs && npm run prepackage && electron-builder --config electron-builder.yml --mac --publish never",
+    "package:dir": "npm run prepackage && electron-builder --config electron-builder.yml --dir --publish never"
   },
   "devDependencies": {
+    "@cuedesigner/web": "*",
     "@types/node": "^22.10.7",
-    "electron": "^34.0.1",
+    "electron": "34.5.8",
+    "electron-builder": "25.1.8",
     "typescript": "^5.7.3"
   }
 }

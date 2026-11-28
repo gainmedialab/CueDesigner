@@ -12,5 +12,7 @@ coverage/
 *.tsbuildinfo
 release/
 packages/electron/dist/
+packages/electron/renderer/
+packages/electron/release/
 packages/web/dist/
 packages/core/dist/
