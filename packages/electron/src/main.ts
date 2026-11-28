@@ -11,17 +11,32 @@ app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 function webDistIndex(): string {
-  const candidates = [
-    // Packaged app (copied by scripts/prepare-renderer.mjs)
-    path.join(__dirname, "..", "renderer", "index.html"),
-    // Dev / unpackaged workspace
-    path.join(__dirname, "..", "..", "web", "dist", "index.html"),
-    path.join(__dirname, "..", "renderer", "index.html"),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
+  // Unpackaged (`electron .` after npm run build): ALWAYS prefer the workspace
+  // web dist. A leftover packages/electron/renderer/ from package:mac /
+  // prepare:renderer used to win here and silently served a stale UI — Follow
+  // + zoom-to-playhead fixes looked like no-ops after rebuilding web only.
+  const workspaceWeb = path.join(
+    __dirname,
+    "..",
+    "..",
+    "web",
+    "dist",
+    "index.html",
+  );
+  const packagedRenderer = path.join(__dirname, "..", "renderer", "index.html");
+
+  if (!app.isPackaged) {
+    const unpackaged = [workspaceWeb, packagedRenderer];
+    for (const c of unpackaged) {
+      if (fs.existsSync(c)) return c;
+    }
+    return workspaceWeb;
   }
-  return candidates[0]!;
+
+  // Packaged .app: renderer is copied next to main by prepare-renderer.mjs
+  if (fs.existsSync(packagedRenderer)) return packagedRenderer;
+  if (fs.existsSync(workspaceWeb)) return workspaceWeb;
+  return packagedRenderer;
 }
 
 function allowPermission(permission: string): boolean {
@@ -78,6 +93,7 @@ function createWindow(): void {
   });
 
   if (isDev && DEV_URL) {
+    console.log(`[CueDesigner] loading DEV_URL ${DEV_URL}`);
     void win.loadURL(DEV_URL);
   } else {
     const index = webDistIndex();
@@ -91,6 +107,9 @@ function createWindow(): void {
       );
       return;
     }
+    console.log(
+      `[CueDesigner] loading ${app.isPackaged ? "packaged" : "unpackaged"} UI from ${index}`,
+    );
     void win.loadFile(index);
   }
 }

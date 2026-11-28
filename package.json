@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @cuedesigner/core && npm run build -w @cuedesigner/web && npm run build -w @cuedesigner/electron",
+    "build": "npm run build -w @cuedesigner/core && npm run build -w @cuedesigner/web && npm run build -w @cuedesigner/electron && npm run prepare:renderer -w @cuedesigner/electron",
     "typecheck": "npm run build -w @cuedesigner/core && npm run typecheck -w @cuedesigner/core && npm run typecheck -w @cuedesigner/web && npm run typecheck -w @cuedesigner/electron",
     "dev:web": "npm run dev -w @cuedesigner/web",
     "dev:electron": "npm run dev -w @cuedesigner/electron",
